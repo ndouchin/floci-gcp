@@ -150,6 +150,49 @@ class GkeDockerIntegrationTest {
 
     @Test
     @Order(3)
+    void providesGkeStorageClassesAndBindsAVolumeOnTheDefaultOne() throws Exception {
+        Map<String, JsonNode> classes = new HashMap<>();
+        for (JsonNode sc : JSON.readTree(kubectl("get", "storageclass", "-o", "json")).path("items")) {
+            classes.put(sc.path("metadata").path("name").asText(), sc);
+        }
+        assertEquals(List.of("premium-rwo", "standard", "standard-rwo"), classes.keySet().stream().sorted().toList());
+        JsonNode standardRwo = classes.get("standard-rwo");
+        assertEquals("true", standardRwo.path("metadata").path("annotations")
+                .path("storageclass.kubernetes.io/is-default-class").asText());
+        assertEquals("pd.csi.storage.gke.io", standardRwo.path("provisioner").asText());
+        assertEquals("pd-balanced", standardRwo.path("parameters").path("type").asText());
+        assertEquals("WaitForFirstConsumer", standardRwo.path("volumeBindingMode").asText());
+        assertTrue(standardRwo.path("allowVolumeExpansion").asBoolean());
+        assertEquals("pd-ssd", classes.get("premium-rwo").path("parameters").path("type").asText());
+        assertEquals("pd-standard", classes.get("standard").path("parameters").path("type").asText());
+
+        kubectlApply("""
+                apiVersion: v1
+                kind: PersistentVolumeClaim
+                metadata: {name: data, namespace: default}
+                spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}}
+                ---
+                apiVersion: v1
+                kind: Pod
+                metadata: {name: writer, namespace: default}
+                spec:
+                  containers:
+                  - name: writer
+                    image: rancher/mirrored-library-busybox:1.37.0
+                    command: ["sh", "-c", "echo ok > /data/probe && sleep 3600"]
+                    volumeMounts: [{name: data, mountPath: /data}]
+                  volumes: [{name: data, persistentVolumeClaim: {claimName: data}}]
+                """);
+        await("PVC data Bound", () -> "Bound".equals(kubectl("get", "pvc", "data", "-o", "jsonpath={.status.phase}")));
+        JsonNode pvc = JSON.readTree(kubectl("get", "pvc", "data", "-o", "json"));
+        assertEquals("standard-rwo", pvc.path("spec").path("storageClassName").asText());
+        assertEquals("pd.csi.storage.gke.io", pvc.path("metadata").path("annotations")
+                .path("volume.kubernetes.io/storage-provisioner").asText());
+        kubectl("delete", "pod", "writer", "--wait=false");
+    }
+
+    @Test
+    @Order(4)
     void resizesPoolsAndAppliesTheirTaints() throws Exception {
         Response resize = given().urlEncodingEnabled(false).contentType("application/json").body("{\"nodeCount\": 2}")
                 .post(BASE + "/clusters/" + CLUSTER + "/nodePools/default-pool:setSize");
@@ -177,7 +220,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(4)
+    @Order(5)
     void restoresAStoppedControlPlane() {
         StoredCluster before = stored();
         docker.getDockerClient().stopContainerCmd(before.getContainerId()).withTimeout(5).exec();
@@ -194,7 +237,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(5)
+    @Order(6)
     void upgradesTheControlPlaneOntoTheNextMinorsImage() {
         Response upgrade = given().urlEncodingEnabled(false).contentType("application/json")
                 .body("{\"masterVersion\": \"1.36\"}")
@@ -219,7 +262,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void deletingTheClusterRemovesItsContainersAndNetwork() {
         StoredCluster before = stored();
         given().delete(BASE + "/clusters/" + CLUSTER).then().statusCode(200);
@@ -238,6 +281,11 @@ class GkeDockerIntegrationTest {
         ContainerLifecycleManager.ExecResult result = clusterManager.kubectl(stored(), List.of(args));
         assertEquals(0, result.exitCode(), result.stderr());
         return result.stdout();
+    }
+
+    private void kubectlApply(String manifest) {
+        ContainerLifecycleManager.ExecResult result = clusterManager.applyManifest(stored(), manifest);
+        assertEquals(0, result.exitCode(), result.stderr());
     }
 
     private List<JsonNode> nodesOfPool(String pool) throws Exception {

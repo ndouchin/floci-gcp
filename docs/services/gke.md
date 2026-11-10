@@ -315,6 +315,44 @@ types use the vCPU and memory figures of
 [Accelerator-optimized machines](https://docs.cloud.google.com/compute/docs/accelerator-optimized-machines).
 A machine type the emulator cannot read runs unlimited.
 
+## Storage classes (real mode)
+
+A real cluster comes with the StorageClasses GKE Standard clusters have, and claims on them bind.
+k3s's own `local-path` class is disabled (`--disable=local-storage`); instead the emulator deploys a
+[`local-path-provisioner`](https://github.com/rancher/local-path-provisioner)
+(`rancher/local-path-provisioner:v0.0.37`, deployment `kube-system/floci-pd-provisioner`)
+registered as `pd.csi.storage.gke.io`, the Compute Engine persistent disk CSI driver's name. Volumes
+are directories on the node that runs the pod, kept in the node's data volume.
+
+| StorageClass | Default | Provisioner | `type` | Binding mode | Expansion |
+|---|---|---|---|---|---|
+| `standard-rwo` | yes | `pd.csi.storage.gke.io` | `pd-balanced` | `WaitForFirstConsumer` | `true` |
+| `premium-rwo` | | `pd.csi.storage.gke.io` | `pd-ssd` | `WaitForFirstConsumer` | `true` |
+| `standard` | | `pd.csi.storage.gke.io` (GKE: `kubernetes.io/gce-pd`) | `pd-standard` | `WaitForFirstConsumer` (GKE: `Immediate`) | `true` |
+
+Sources: GKE pre-installs `standard-rwo` (balanced persistent disk) and `premium-rwo` (SSD
+persistent disk) with the CSI driver
+([Using the Compute Engine persistent disk CSI Driver](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/gce-pd-csi-driver)),
+`standard-rwo` is the default class for `ReadWriteOnce` claims and binds `WaitForFirstConsumer`
+([Persistent volumes](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/persistent-volumes));
+`standard` is the in-tree class from the Kubernetes GCE addon
+([`cluster/addons/storage-class/gce/default.yaml`](https://github.com/kubernetes/kubernetes/blob/master/cluster/addons/storage-class/gce/default.yaml)):
+`kubernetes.io/gce-pd`, `pd-standard`, expansion allowed, immediate binding. The reclaim policy is
+`Delete`, the default the persistent volumes page states. The expansion flag of `standard-rwo` and
+`premium-rwo` is the one GKE's documented example classes use; GKE's own objects were not checked.
+
+Deviations, all on what `local-path-provisioner` can do:
+
+- `standard` names `pd.csi.storage.gke.io` and binds `WaitForFirstConsumer`. Under CSI migration
+  Kubernetes hands claims on `kubernetes.io/gce-pd` to the `pd.csi.storage.gke.io` provisioner (the
+  claim's `volume.kubernetes.io/storage-provisioner` annotation says so on GKE too), but
+  `local-path-provisioner` only provisions for classes naming its own provisioner, and a node-local
+  volume needs the node the pod lands on.
+- Expansion is allowed but never completes: nothing resizes the volumes.
+- `ReadWriteMany` claims fail to provision (GKE 1.37.1+ maps them to `regional-rwx`, which is not emulated).
+- The provisioner and its helper (`rancher/mirrored-library-busybox:1.37.0`) are pulled by the nodes
+  from Docker Hub.
+
 ## Supported Operations
 
 - `CreateCluster`, `GetCluster`, `ListClusters`, `DeleteCluster`, `UpdateCluster`, `UpdateMaster`

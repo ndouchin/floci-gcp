@@ -40,6 +40,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -434,6 +435,7 @@ public class GkeClusterManager {
         if (webhookLocalFile != null) {
             copyWebhookIntoContainer(containerId, webhookLocalFile, cluster.getName());
         }
+        copyAutoDeployManifests(containerId, cluster.getName());
         ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
 
         cluster.setEndpoint(resolvePublicEndpoint(
@@ -595,6 +597,14 @@ public class GkeClusterManager {
         command.add("kubectl");
         command.addAll(args);
         return lifecycleManager.exec(cluster.getContainerId(), List.of(), command);
+    }
+
+    /** Applies a manifest with kubectl in the control plane container. */
+    public ContainerLifecycleManager.ExecResult applyManifest(StoredCluster cluster, String manifest) {
+        String file = "floci-apply-" + UUID.randomUUID() + ".yaml";
+        RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), cluster.getContainerId(), "/tmp", file,
+                manifest.getBytes(StandardCharsets.UTF_8), 0644);
+        return kubectl(cluster, List.of("apply", "-f", "/tmp/" + file));
     }
 
     /** The cluster's Kubernetes nodes by name, or null when the control plane cannot list them. */
@@ -831,6 +841,17 @@ public class GkeClusterManager {
             LOG.warnv("GKE token-webhook disabled for cluster {0}: could not write kubeconfig: {1}",
                     clusterName, e.getMessage());
             return null;
+        }
+    }
+
+    /** Drops the manifests k3s applies at startup (GKE's storage classes) into its data volume. */
+    private void copyAutoDeployManifests(String containerId, String clusterName) {
+        try {
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, K3S_DATA_DIR,
+                    GkeStorage.MANIFEST_ENTRY, GkeStorage.manifest().getBytes(StandardCharsets.UTF_8), 0644);
+        } catch (Exception e) {
+            LOG.warnv("GKE cluster {0} starts without its storage classes: could not copy their manifest into the "
+                    + "k3s container: {1}", clusterName, e.getMessage());
         }
     }
 
