@@ -31,6 +31,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -266,6 +268,88 @@ class GkeServiceTest {
         assertEquals("RUNNING", replacementOp.getStatus());
         assertNull(replacementOp.getError());
         assertEquals("PROVISIONING", service.getCluster(PROJECT, LOCATION, "racing").getStatus());
+    }
+
+    @Test
+    void deleteClusterRemovesTheControlPlaneRatherThanStoppingIt() {
+        when(gkeConfig.mock()).thenReturn(false);
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "kept"));
+
+        service.deleteCluster(PROJECT, LOCATION, "kept");
+
+        verify(clusterManager).deleteCluster(any());
+        verify(clusterManager, never()).stopCluster(any());
+    }
+
+    @Test
+    void restoreBringsPersistedClustersBackThroughReconciling() {
+        StoredCluster running = persistedCluster("survivor", "RUNNING");
+        when(gkeConfig.mock()).thenReturn(false);
+        when(clusterManager.restoreCluster(any())).thenReturn(GkeClusterManager.RestoreOutcome.ADOPTED);
+
+        service.restoreRuntime();
+
+        verify(clusterManager).restoreCluster(any());
+        assertEquals("RECONCILING", service.getCluster(PROJECT, LOCATION, running.getName()).getStatus());
+
+        when(clusterManager.isReady(any())).thenReturn(true);
+        doAnswer(inv -> {
+            inv.<StoredCluster>getArgument(0).setCaCertificate("bmV3LWNh");
+            return null;
+        }).when(clusterManager).finalizeCluster(any());
+        service.pollReadiness();
+
+        StoredCluster restored = service.getCluster(PROJECT, LOCATION, running.getName());
+        assertEquals("RUNNING", restored.getStatus());
+        assertEquals("bmV3LWNh", restored.getCaCertificate());
+    }
+
+    @Test
+    void restoreLeavesFailedClustersAlone() {
+        persistedCluster("failed", "ERROR");
+        when(gkeConfig.mock()).thenReturn(false);
+
+        service.restoreRuntime();
+
+        verify(clusterManager, never()).restoreCluster(any());
+        assertEquals("ERROR", service.getCluster(PROJECT, LOCATION, "failed").getStatus());
+    }
+
+    @Test
+    void aRestoreThatCannotStartTheControlPlaneMarksTheClusterFailed() {
+        persistedCluster("unlucky", "RUNNING");
+        when(gkeConfig.mock()).thenReturn(false);
+        when(clusterManager.restoreCluster(any())).thenThrow(new IllegalStateException("docker unavailable"));
+
+        service.restoreRuntime();
+
+        StoredCluster cluster = service.getCluster(PROJECT, LOCATION, "unlucky");
+        assertEquals("ERROR", cluster.getStatus());
+        assertTrue(cluster.getStatusMessage().contains("docker unavailable"));
+    }
+
+    @Test
+    void aReconcilingClusterThatNeverComesBackFails() {
+        persistedCluster("slow", "RUNNING");
+        when(gkeConfig.mock()).thenReturn(false);
+        when(clusterManager.restoreCluster(any())).thenReturn(GkeClusterManager.RestoreOutcome.RECREATED_ON_VOLUME);
+        service.restoreRuntime();
+
+        clusterStore.get("projects/" + PROJECT + "/locations/" + LOCATION + "/clusters/slow").orElseThrow()
+                .setReconcileSince(Instant.now().minus(GkeService.STARTUP_TIMEOUT).minusSeconds(1).toString());
+        service.pollReadiness();
+
+        assertEquals("ERROR", service.getCluster(PROJECT, LOCATION, "slow").getStatus());
+    }
+
+    private StoredCluster persistedCluster(String name, String status) {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", name));
+        StoredCluster cluster = clusterStore.get("projects/" + PROJECT + "/locations/" + LOCATION + "/clusters/" + name)
+                .orElseThrow();
+        cluster.setStatus(status);
+        cluster.setContainerId("old-container");
+        cluster.setCaCertificate("b2xkLWNh");
+        return cluster;
     }
 
     @Test

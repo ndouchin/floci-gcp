@@ -5,6 +5,7 @@ import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.docker.ContainerBuilder;
@@ -29,6 +30,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -54,6 +57,13 @@ public class GkeClusterManager {
     private static final String WEBHOOK_CONFIG_DIR = "/etc";
     private static final String WEBHOOK_CONFIG_FILE = "gke-token-webhook.yaml";
     private static final String WEBHOOK_CONFIG_PATH = WEBHOOK_CONFIG_DIR + "/" + WEBHOOK_CONFIG_FILE;
+
+    /** How {@link #restoreCluster} brought a persisted cluster's control plane back. */
+    public enum RestoreOutcome {
+        ADOPTED,
+        RECREATED_ON_VOLUME,
+        RECREATED_FRESH
+    }
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -90,9 +100,7 @@ public class GkeClusterManager {
         LOG.infov("Starting k3s container for GKE cluster {0} using image {1}",
                 cluster.getName(), image);
 
-        int hostPort = portAllocator.allocate(
-                config.services().gke().apiServerBasePort(),
-                config.services().gke().apiServerMaxPort());
+        int hostPort = allocateHostPort(cluster.getHostPort());
         cluster.setHostPort(hostPort);
         try {
             launchContainer(cluster, image, containerName, hostPort);
@@ -102,6 +110,72 @@ public class GkeClusterManager {
             cluster.setHostPort(0);
             throw e;
         }
+    }
+
+    /**
+     * Restarts on the port a persisted cluster already advertised when it is still free, so a
+     * kubeconfig written before an emulator restart keeps working; any free port otherwise.
+     */
+    private int allocateHostPort(int previous) {
+        if (previous > 0) {
+            try {
+                return portAllocator.allocate(previous, previous);
+            } catch (RuntimeException e) {
+                LOG.infov("Port {0} of a restored GKE cluster is taken, allocating another", String.valueOf(previous));
+            }
+        }
+        return portAllocator.allocate(config.services().gke().apiServerBasePort(),
+                config.services().gke().apiServerMaxPort());
+    }
+
+    /**
+     * Brings a persisted cluster's control plane back after an emulator restart: the surviving
+     * container is adopted (started if stopped) on the port it publishes, otherwise a new one
+     * starts on the surviving data volume, which keeps the cluster's CA and state, otherwise a new
+     * one starts on a fresh volume.
+     */
+    public RestoreOutcome restoreCluster(StoredCluster cluster) {
+        Optional<Container> survivor = lifecycleManager.listContainersByLabels("list GKE control plane containers",
+                        identityFilter(cluster)).stream()
+                .findFirst();
+        if (survivor.isPresent()) {
+            adoptControlPlane(cluster, survivor.get().getId());
+            return RestoreOutcome.ADOPTED;
+        }
+        boolean volumeSurvived = lifecycleManager.volumeExists(volumeName(cluster));
+        cluster.setContainerId(null);
+        startCluster(cluster);
+        if (!volumeSurvived) {
+            LOG.warnv("GKE cluster {0} had neither a container nor a data volume left; it starts fresh with a "
+                    + "new CA, so kubeconfigs written before the restart no longer work", cluster.getName());
+            return RestoreOutcome.RECREATED_FRESH;
+        }
+        return RestoreOutcome.RECREATED_ON_VOLUME;
+    }
+
+    private void adoptControlPlane(StoredCluster cluster, String containerId) {
+        ContainerInfo info = lifecycleManager.adopt(containerId, List.of(K3S_API_SERVER_PORT));
+        int hostPort = info.publishedHostPort(K3S_API_SERVER_PORT).orElse(cluster.getHostPort());
+        if (hostPort > 0) {
+            portAllocator.markReserved(hostPort);
+        }
+        cluster.setContainerId(containerId);
+        cluster.setHostPort(hostPort);
+        String containerName = ContainerStorageHelper.dockerName(config,
+                "gke-" + cluster.getProject() + "-" + cluster.getName());
+        cluster.setEndpoint(resolvePublicEndpoint(containerDetector.isRunningInContainer(),
+                config.services().gke().endpointMode(), containerName, hostPort));
+        ContainerLifecycleManager.EndpointInfo ep = info.getEndpoint(K3S_API_SERVER_PORT);
+        cluster.setInternalEndpoint(containerDetector.isRunningInContainer() && ep != null
+                ? "https://" + ep.host() + ":" + ep.port()
+                : "https://localhost:" + hostPort);
+        LOG.infov("Adopted k3s container {0} for GKE cluster {1} on port {2}",
+                containerId, cluster.getName(), String.valueOf(hostPort));
+    }
+
+    private static Map<String, String> identityFilter(StoredCluster cluster) {
+        return ContainerStorageHelper.resourceIdentityLabels(
+                "gke", cluster.getName(), cluster.getProject(), cluster.getLocation());
     }
 
     /**

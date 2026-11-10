@@ -69,6 +69,8 @@ public class StoredCluster {
     private String volumeName;
     /** Name of the {@code CREATE_CLUSTER} operation that created this record. */
     private String createOperation;
+    /** When the cluster entered {@code RECONCILING}; its control plane must be ready again within the startup timeout. */
+    private String reconcileSince;
 
     public StoredCluster() {
     }
@@ -117,6 +119,7 @@ public class StoredCluster {
         this.internalEndpoint = other.internalEndpoint;
         this.volumeName = other.volumeName;
         this.createOperation = other.createOperation;
+        this.reconcileSince = other.reconcileSince;
     }
 
     public String getName() {
@@ -381,5 +384,13 @@ public class StoredCluster {
 
     public void setCreateOperation(String createOperation) {
         this.createOperation = createOperation;
+    }
+
+    public String getReconcileSince() {
+        return reconcileSince;
+    }
+
+    public void setReconcileSince(String reconcileSince) {
+        this.reconcileSince = reconcileSince;
     }
 }

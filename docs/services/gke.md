@@ -124,6 +124,24 @@ resolves correctly.
 
 This flow requires a real cluster: it does not apply in mock mode, where no API server is started.
 
+## Restarts and persistence
+
+With a persistent store (`persistent`, `hybrid` or `wal`), clusters survive an emulator restart.
+At startup each persisted cluster that had not failed goes to `RECONCILING` while its control
+plane comes back, then to `RUNNING` once its API server answers again:
+
+- a surviving k3s container (left running by `FLOCI_GCP_SERVICES_GKE_KEEP_RUNNING_ON_SHUTDOWN=true`,
+  or stopped by a Docker restart) is adopted and started if needed, on the host port it publishes;
+- otherwise a new container starts on the surviving data volume, which keeps the cluster's CA and
+  everything stored in it, on the same host port when that port is still free;
+- otherwise the cluster starts fresh on a new volume. Its CA changes, so kubeconfigs written before
+  the restart stop working, and a WARN log line says so.
+
+With the default `keep-running-on-shutdown: false`, shutdown removes the containers and their
+volumes, so a restart always takes the last path. In `memory` storage mode nothing is restored.
+`DeleteCluster` removes the cluster's containers and volumes whatever
+`keep-running-on-shutdown` says.
+
 ## Mock Mode
 
 Set `FLOCI_GCP_SERVICES_GKE_MOCK=true` to create clusters in memory that report `RUNNING`

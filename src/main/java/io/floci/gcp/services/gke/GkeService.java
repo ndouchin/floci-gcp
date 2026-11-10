@@ -146,7 +146,55 @@ public class GkeService {
         migrateEmbeddedNodePools();
         refreshPersistedNodeVersionAggregates();
         if (!mock()) {
+            poller.schedule(this::restoreRuntime, 1, TimeUnit.SECONDS);
             poller.scheduleAtFixedRate(this::pollReadiness, 2, 3, TimeUnit.SECONDS);
+        }
+    }
+
+    /**
+     * Brings back the control plane of every persisted cluster after an emulator restart (persistent,
+     * hybrid or wal storage; a memory store starts empty). Each cluster goes through
+     * {@code RECONCILING} until its API server answers again, and its CA is read anew, since a cluster
+     * whose data volume is gone starts with a new one. Clusters that had already failed stay as they were.
+     */
+    void restoreRuntime() {
+        for (StoredCluster cluster : clusterStore.scan(k -> true)) {
+            if (cluster.getName() == null || "ERROR".equals(cluster.getStatus())
+                    || "STOPPING".equals(cluster.getStatus())) {
+                continue;
+            }
+            String key = clusterKey(cluster.getProject(), cluster.getLocation(), cluster.getName());
+            StoredCluster probe = new StoredCluster(cluster);
+            String failure = null;
+            GkeClusterManager.RestoreOutcome outcome = null;
+            try {
+                outcome = clusterManager.restoreCluster(probe);
+            } catch (Exception e) {
+                failure = "Could not restore the control plane of cluster " + cluster.getName() + ": " + e.getMessage();
+            }
+            synchronized (lifecycleLock) {
+                StoredCluster current = clusterStore.get(key).orElse(null);
+                if (current == null || !Objects.equals(current.getCreateOperation(), cluster.getCreateOperation())) {
+                    continue;
+                }
+                current.setContainerId(probe.getContainerId());
+                current.setHostPort(probe.getHostPort());
+                current.setEndpoint(probe.getEndpoint());
+                current.setInternalEndpoint(probe.getInternalEndpoint());
+                current.setVolumeName(probe.getVolumeName());
+                if (failure != null) {
+                    current.setStatus("ERROR");
+                    current.setStatusMessage(failure);
+                    operationService.completeOperation(current.getCreateOperation(),
+                            operationError(Status.Code.INTERNAL, failure));
+                    LOG.warnv("GKE cluster {0}: {1}", cluster.getName(), failure);
+                } else if (!"PROVISIONING".equals(current.getStatus())) {
+                    current.setStatus("RECONCILING");
+                    current.setReconcileSince(Instant.now().toString());
+                    LOG.infov("Restoring GKE cluster {0} ({1})", cluster.getName(), outcome);
+                }
+                clusterStore.put(key, current);
+            }
         }
     }
 
@@ -1039,7 +1087,7 @@ public class GkeService {
 
     void pollReadiness() {
         for (StoredCluster cluster : clusterStore.scan(k -> true)) {
-            if ("PROVISIONING".equals(cluster.getStatus())) {
+            if ("PROVISIONING".equals(cluster.getStatus()) || "RECONCILING".equals(cluster.getStatus())) {
                 try {
                     pollCluster(cluster);
                 } catch (Exception e) {
@@ -1071,26 +1119,29 @@ public class GkeService {
         }
     }
 
-    /** Moves a still-provisioning cluster to {@code RUNNING} (with its CA) or, given a failure, to
-     * {@code ERROR}, and finishes the create operation recorded on it. A pass whose cluster was
-     * deleted, recreated or settled meanwhile writes nothing. */
+    /** Moves a still-provisioning or reconciling cluster to {@code RUNNING} (with its CA) or, given a
+     * failure, to {@code ERROR}, and finishes the create operation recorded on it. A pass whose cluster
+     * was deleted, recreated or settled meanwhile writes nothing. */
     private void settle(StoredCluster seen, String caCertificate, String failure) {
         String key = clusterKey(seen.getProject(), seen.getLocation(), seen.getName());
         synchronized (lifecycleLock) {
             Optional<StoredCluster> current = clusterStore.get(key);
             if (current.isEmpty()
                     || !Objects.equals(current.get().getCreateOperation(), seen.getCreateOperation())
-                    || !"PROVISIONING".equals(current.get().getStatus())) {
+                    || !Objects.equals(current.get().getStatus(), seen.getStatus())
+                    || !Objects.equals(current.get().getReconcileSince(), seen.getReconcileSince())) {
                 return;
             }
             StoredCluster cluster = current.get();
             if (failure == null) {
                 cluster.setCaCertificate(caCertificate);
                 cluster.setStatus("RUNNING");
+                cluster.setStatusMessage(null);
             } else {
                 cluster.setStatus("ERROR");
                 cluster.setStatusMessage(failure);
             }
+            cluster.setReconcileSince(null);
             clusterStore.put(key, cluster);
             operationService.completeOperation(cluster.getCreateOperation(),
                     failure == null ? null : operationError(Status.Code.INTERNAL, failure));
@@ -1107,9 +1158,10 @@ public class GkeService {
      * may still be starting is worse than waiting. The stopped-container check still applies. */
     boolean startupExpired(StoredCluster cluster) {
         Instant created = null;
-        if (cluster.getCreateTime() != null) {
+        String since = cluster.getReconcileSince() != null ? cluster.getReconcileSince() : cluster.getCreateTime();
+        if (since != null) {
             try {
-                created = Instant.parse(cluster.getCreateTime());
+                created = Instant.parse(since);
             } catch (DateTimeParseException e) {
                 // Logged below, once per cluster.
             }
