@@ -248,7 +248,7 @@ public class GkeClusterManager {
         }
     }
 
-    /** Stops and removes the k3s container and its data volume. */
+    /** Stops and removes the k3s container and its data volume at shutdown, unless clusters are kept running. */
     public void stopCluster(StoredCluster cluster) {
         if (cluster.getContainerId() == null) {
             return;
@@ -257,6 +257,18 @@ public class GkeClusterManager {
             LOG.infov("Leaving k3s container for cluster {0} running", cluster.getName());
             return;
         }
+        removeCluster(cluster);
+    }
+
+    /** Removes the k3s container and its data volume of a deleted cluster, whatever the shutdown policy. */
+    public void deleteCluster(StoredCluster cluster) {
+        if (cluster.getContainerId() == null) {
+            return;
+        }
+        removeCluster(cluster);
+    }
+
+    private void removeCluster(StoredCluster cluster) {
         lifecycleManager.stopAndRemove(cluster.getContainerId(), null);
         lifecycleManager.removeVolume(volumeName(cluster));
         if (cluster.getHostPort() > 0) {

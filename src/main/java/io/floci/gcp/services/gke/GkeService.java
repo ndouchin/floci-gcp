@@ -365,7 +365,7 @@ public class GkeService {
         StoredCluster cluster = clusterStore.get(key)
                 .orElseThrow(() -> GcpException.notFound("Not found: cluster " + clusterId));
         if (!mock()) {
-            clusterManager.stopCluster(cluster);
+            clusterManager.deleteCluster(cluster);
         }
         for (StoredNodePool pool : listNodePools(project, location, clusterId)) {
             nodePoolStore.delete(nodePoolKey(project, location, clusterId, pool.getName()));

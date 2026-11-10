@@ -97,6 +97,18 @@ class GkeClusterManagerPortTest {
         assertThrows(RuntimeException.class, this::allocate);
     }
 
+    @Test
+    void deleteClusterRemovesTheContainerEvenWhenClustersAreKeptRunningOnShutdown() {
+        StoredCluster cluster = runningCluster();
+        when(config.services().gke().keepRunningOnShutdown()).thenReturn(true);
+
+        manager().deleteCluster(cluster);
+
+        verify(lifecycleManager).stopAndRemove("container-1", null);
+        verify(lifecycleManager).removeVolume("floci-gcp-gke-p1-c1");
+        assertEquals(port, allocate());
+    }
+
     private StoredCluster runningCluster() {
         assertEquals(port, allocate());
         StoredCluster cluster = cluster();
