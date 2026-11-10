@@ -84,6 +84,9 @@ public class GkeService {
     /** Serializes the Docker work on one cluster's nodes (reconciles, pool and cluster deletes). Taken
      * before {@link #lifecycleLock}, never while holding it. */
     private final Map<String, Object> clusterLocks = new ConcurrentHashMap<>();
+    /** Clusters whose control plane container is being recreated; the readiness poller leaves them
+     * alone until the new container is recorded, since the old one is gone by design. */
+    private final Set<String> replacingControlPlanes = ConcurrentHashMap.newKeySet();
     private final SecureRandom random = new SecureRandom();
     /** Create operations whose cluster has an unreadable {@code createTime}, already logged once. */
     private final Set<String> unreadableCreateTimes = ConcurrentHashMap.newKeySet();
@@ -594,25 +597,33 @@ public class GkeService {
         touch(cluster);
         StoredOperation op = operationService.createRunningOperation(project, location, clusterId, type);
         String key = clusterKey(project, location, clusterId);
-        synchronized (lifecycleLock) {
-            cluster.setStatus("RECONCILING");
-            cluster.setReconcileSince(Instant.now().toString());
-            cluster.setPendingOperation(op.getName());
-            clusterStore.put(key, cluster);
-        }
+        replacingControlPlanes.add(key);
         try {
-            clusterManager.replaceControlPlane(cluster);
-            clusterStore.put(key, cluster);
-        } catch (Exception e) {
-            String failure = "Could not upgrade the control plane of cluster " + clusterId + ": " + e.getMessage();
-            synchronized (lifecycleLock) {
-                cluster.setStatus("ERROR");
-                cluster.setStatusMessage(failure);
-                cluster.setReconcileSince(null);
-                cluster.setPendingOperation(null);
-                clusterStore.put(key, cluster);
+            synchronized (clusterLock(key)) {
+                synchronized (lifecycleLock) {
+                    cluster.setStatus("RECONCILING");
+                    cluster.setReconcileSince(Instant.now().toString());
+                    cluster.setPendingOperation(op.getName());
+                    clusterStore.put(key, cluster);
+                }
+                try {
+                    clusterManager.replaceControlPlane(cluster);
+                    clusterStore.put(key, cluster);
+                } catch (Exception e) {
+                    String failure = "Could not upgrade the control plane of cluster " + clusterId + ": "
+                            + e.getMessage();
+                    synchronized (lifecycleLock) {
+                        cluster.setStatus("ERROR");
+                        cluster.setStatusMessage(failure);
+                        cluster.setReconcileSince(null);
+                        cluster.setPendingOperation(null);
+                        clusterStore.put(key, cluster);
+                    }
+                    operationService.completeOperation(op.getName(), operationError(Status.Code.INTERNAL, failure));
+                }
             }
-            operationService.completeOperation(op.getName(), operationError(Status.Code.INTERNAL, failure));
+        } finally {
+            replacingControlPlanes.remove(key);
         }
         return operationService.getOperation(project, location, op.getName());
     }
@@ -1342,7 +1353,9 @@ public class GkeService {
 
     void pollReadiness() {
         for (StoredCluster cluster : clusterStore.scan(k -> true)) {
-            if ("PROVISIONING".equals(cluster.getStatus()) || "RECONCILING".equals(cluster.getStatus())) {
+            if (("PROVISIONING".equals(cluster.getStatus()) || "RECONCILING".equals(cluster.getStatus()))
+                    && !replacingControlPlanes.contains(
+                            clusterKey(cluster.getProject(), cluster.getLocation(), cluster.getName()))) {
                 try {
                     pollCluster(cluster);
                 } catch (Exception e) {

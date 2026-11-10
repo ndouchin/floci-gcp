@@ -1006,6 +1006,25 @@ class GkeServiceTest {
     }
 
     @Test
+    void aReadinessPassWhileTheControlPlaneIsReplacedDoesNotFailTheUpgrade() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "racing-upgrade"));
+        when(gkeConfig.mock()).thenReturn(false);
+        when(clusterManager.isControlPlaneStopped(any())).thenReturn(true);
+        doAnswer(inv -> {
+            StoredCluster replaced = inv.getArgument(0);
+            replaced.setContainerId(null);
+            service.pollReadiness();
+            replaced.setContainerId("new-container");
+            return null;
+        }).when(clusterManager).replaceControlPlane(any());
+
+        StoredOperation op = service.updateMaster(PROJECT, LOCATION, "racing-upgrade", Map.of("masterVersion", "1.36"));
+
+        assertEquals("RUNNING", service.getOperation(PROJECT, LOCATION, op.getName()).getStatus());
+        assertEquals("RECONCILING", service.getCluster(PROJECT, LOCATION, "racing-upgrade").getStatus());
+    }
+
+    @Test
     void updateMasterRejectsAMissingVersionWithoutTouchingTheCluster() {
         service.createCluster(PROJECT, LOCATION, Map.of("name", "needs-version"));
         StoredCluster before = service.getCluster(PROJECT, LOCATION, "needs-version");
