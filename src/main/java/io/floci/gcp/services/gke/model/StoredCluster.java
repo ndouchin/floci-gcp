@@ -71,6 +71,8 @@ public class StoredCluster {
     private String createOperation;
     /** When the cluster entered {@code RECONCILING}; its control plane must be ready again within the startup timeout. */
     private String reconcileSince;
+    /** Operation finished when the cluster leaves {@code RECONCILING}, such as a control plane upgrade. */
+    private String pendingOperation;
 
     public StoredCluster() {
     }
@@ -120,6 +122,7 @@ public class StoredCluster {
         this.volumeName = other.volumeName;
         this.createOperation = other.createOperation;
         this.reconcileSince = other.reconcileSince;
+        this.pendingOperation = other.pendingOperation;
     }
 
     public String getName() {
@@ -392,5 +395,13 @@ public class StoredCluster {
 
     public void setReconcileSince(String reconcileSince) {
         this.reconcileSince = reconcileSince;
+    }
+
+    public String getPendingOperation() {
+        return pendingOperation;
+    }
+
+    public void setPendingOperation(String pendingOperation) {
+        this.pendingOperation = pendingOperation;
     }
 }

@@ -11,7 +11,8 @@ or a lightweight mock mode.
 |---|---|---|
 | `FLOCI_GCP_SERVICES_GKE_ENABLED` | `true` | Enable/disable GKE |
 | `FLOCI_GCP_SERVICES_GKE_MOCK` | `false` | Mock mode: clusters return `RUNNING` immediately without starting a k3s container |
-| `FLOCI_GCP_SERVICES_GKE_DEFAULT_IMAGE` | `rancher/k3s:latest` | Image used for real clusters |
+| `FLOCI_GCP_SERVICES_GKE_IMAGE_REPOSITORY` | `rancher/k3s` | Repository of the k3s images pinned per Kubernetes minor version (see [Versions](#versions)) |
+| `FLOCI_GCP_SERVICES_GKE_DEFAULT_IMAGE` | _(none)_ | Forces one image on every cluster, whatever its version |
 | `FLOCI_GCP_SERVICES_GKE_API_SERVER_BASE_PORT` | `6550` | Start of the host port range for k3s API servers |
 | `FLOCI_GCP_SERVICES_GKE_API_SERVER_MAX_PORT` | `6599` | End of the host port range |
 | `FLOCI_GCP_SERVICES_GKE_ENDPOINT_MODE` | `host` | How the cluster endpoint is advertised to `kubectl` (`host` for a reachable `host:port`) |
@@ -104,6 +105,55 @@ always call `v1beta1`; point them at the same host mode endpoint
     gcloud container clusters create my-cluster --region=us-central1 --async
     gcloud container clusters list --region=us-central1
     ```
+
+## Versions
+
+Each supported Kubernetes minor runs on one pinned k3s release, and is advertised as
+`1.<minor>.<k3s patch>-gke.1000000` (the build number `1000000` is fixed and means nothing). The
+channels and defaults follow the [GKE release schedule](https://docs.cloud.google.com/kubernetes-engine/docs/release-schedule)
+as of 2026-11-10.
+
+| Minor | k3s image | Advertised version | Channels | Valid master version |
+|---|---|---|---|---|
+| 1.32 | `rancher/k3s:v1.32.13-k3s1` | `1.32.13-gke.1000000` | EXTENDED | no (extended support only) |
+| 1.33 | `rancher/k3s:v1.33.13-k3s2` | `1.33.13-gke.1000000` | EXTENDED | no (extended support only) |
+| 1.34 | `rancher/k3s:v1.34.13-k3s1` | `1.34.13-gke.1000000` | REGULAR, STABLE, EXTENDED | yes |
+| 1.35 | `rancher/k3s:v1.35.10-k3s1` | `1.35.10-gke.1000000` | RAPID, REGULAR, STABLE, EXTENDED | yes |
+| 1.36 | `rancher/k3s:v1.36.6-k3s1` | `1.36.6-gke.1000000` | RAPID, REGULAR, STABLE, EXTENDED | yes |
+| 1.37 | `rancher/k3s:v1.37.2-k3s1` | `1.37.2-gke.1000000` | RAPID, REGULAR, EXTENDED | yes |
+
+- `GetServerConfig` lists exactly these versions: `validMasterVersions` the standard-support minors,
+  `validNodeVersions` all of them, and one entry per channel with its `defaultVersion` and
+  `validVersions`. `defaultClusterVersion` is the REGULAR channel's default, `1.35.10-gke.1000000`,
+  as on GKE, where it matches the REGULAR default. Channel defaults: RAPID 1.36, REGULAR, STABLE and
+  EXTENDED 1.35.
+- A cluster created without `initialClusterVersion` gets its `releaseChannel`'s default, REGULAR's
+  without one. `initialClusterVersion`, `UpdateMaster.masterVersion`, `desiredMasterVersion`,
+  `desiredNodeVersion`, `UpdateNodePool.nodeVersion` and a node pool's `version` accept the
+  documented spellings: `latest` (the highest version, in the cluster's channel when it has one),
+  `-` (the default version; for node fields the cluster's master version), `1.X` and `1.X.Y` (the
+  advertised version of that minor, when it matches), and an explicit `1.X.Y-gke.N`.
+- An explicit `1.X.Y-gke.N` of a supported minor is stored as sent even when it is not the
+  advertised version, and runs on that minor's image. A version of any other minor is rejected
+  with `400 INVALID_ARGUMENT` and `Master version "<v>" is unsupported.` (`Node version ...` for
+  node fields); an alias that matches nothing with `No valid versions with the prefix "<v>" found.`
+  Both messages are the ones GKE users report for retired versions in public issue trackers; they
+  were not checked against the live API.
+- The control plane moves up one minor at a time and never down a minor; a patch downgrade within
+  its minor is allowed. Node pools may not run a newer minor than the control plane, nor one more
+  than two minors older. These rules come from
+  [Upgrade a cluster](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/upgrading-a-cluster);
+  the minor-downgrade rejection uses the message that page shows (`Master cannot be upgraded to
+  "<v>": specified version is not newer than the current version.`), the other messages are the
+  emulator's own.
+- On a real cluster, a master version on another minor (`UpdateMaster`, or `UpdateCluster` with
+  `desiredMasterVersion`) recreates the k3s server on that minor's image with the same data volume
+  and host port, as an in-place k3s upgrade does. The cluster is `RECONCILING` and the operation
+  `RUNNING` until the API server answers again. A patch change only updates the recorded version.
+  Only a `RUNNING` cluster can be upgraded (`400 FAILED_PRECONDITION` otherwise).
+- The k3s API server reports its own version (`v1.35.10+k3s1`), not the GKE one.
+- A cluster persisted by an earlier floci-gcp build on a minor that is no longer supported keeps its
+  recorded version and runs on the default release's image.
 
 ## kubectl Access
 
@@ -207,8 +257,8 @@ analysis, since floci-gcp has no real infrastructure behind them to inspect:
 - `CheckAutopilotCompatibility` always reports no issues — there is no real
   policy engine to evaluate a cluster's configuration against.
 - `FetchClusterUpgradeInfo`/`FetchNodePoolUpgradeInfo` report the current
-  version as both current and target with nothing pending — floci-gcp has a
-  single fixed master/node version, so there is never a real upgrade path.
+  version as both current and target with nothing pending: floci-gcp runs no
+  auto-upgrade, so nothing is ever scheduled.
 - `UpdateCluster` with `desiredNodeVersion` upgrades the single node pool named
   by `desiredNodePoolId`, matching the real API, where that field is mandatory
   once a cluster has more than one pool. With exactly one pool the id may be
@@ -223,14 +273,10 @@ analysis, since floci-gcp has no real infrastructure behind them to inspect:
 - `UpdateMaster` moves only the control plane: `currentMasterVersion` changes and
   `currentNodeVersion` and every node pool's `version` stay as they were, as in real
   GKE, where the master and node pools upgrade independently. `masterVersion` is
-  required (`400 INVALID_ARGUMENT` when missing). The aliases the API documents
-  resolve against this emulator's single advertised version: `latest`, `-`, and a
-  `1.X` / `1.X.Y` prefix of it all pick that version; any other explicit `1.X.Y-gke.N`
-  is stored verbatim, as `CreateCluster` and `UpdateCluster` already do. A `1.X` /
-  `1.X.Y` alias that matches no valid version has nothing to pick and is rejected with
-  `400 INVALID_ARGUMENT` naming the field and the valid version, as is a value outside
-  the five documented shapes (a bare `1`, for example). The operation is
-  reported as `UPGRADE_MASTER`, the `Operation.Type` real GKE uses.
+  required (`400 INVALID_ARGUMENT` when missing). Its aliases and checks are described
+  under [Versions](#versions); a value outside the five documented shapes (a bare `1`,
+  for example) is rejected with `400 INVALID_ARGUMENT`. The operation is reported as
+  `UPGRADE_MASTER`, the `Operation.Type` real GKE uses.
 
 **Autopilot mode** (`autopilot.enabled`) and **Fleet/Anthos registration**
 (`fleet`) are not semantically modeled — floci-gcp does not run a real
@@ -248,9 +294,8 @@ fingerprint/etag) rather than performing a real dual-certificate rotation window
 live client traffic to migrate off an old certificate in this emulator.
 `CompleteNodePoolUpgrade`/`RollbackNodePoolUpgrade` validate the node pool exists, then return
 `{}` and an Operation respectively; there is no real node-version upgrade in flight to complete or
-roll back, since node pools don't run real node VMs. `GetServerConfig` reports this emulator's
-single supported master/node version across all three release channels
-(`RAPID`/`REGULAR`/`STABLE`) — there is no real multi-version fleet behind it.
+roll back, since node pools don't run real node VMs. `GetServerConfig` is described under
+[Versions](#versions).
 
 ## Limitations
 

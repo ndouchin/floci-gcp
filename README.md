@@ -261,7 +261,7 @@ floci-gcp uses real Docker containers when in-process emulation would reduce fid
 | Managed Kafka | `redpandadata/redpanda:latest`, `apache/kafka:4.3.1` (Connect) | Kafka-compatible broker via Redpanda; a Kafka Connect worker per Connect cluster | `FLOCI_GCP_SERVICES_KAFKA_MOCK` |
 | Cloud SQL for PostgreSQL and MySQL | `postgres:15.18-alpine` (15-18), `mysql:8.0.46` / `mysql:8.4.11` | PostgreSQL or MySQL engine, JDBC-compatible access | `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` |
 | Cloud Run | User-specified container image | Service and instance request serving, job tasks run to completion, worker pool replicas | `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK` |
-| GKE (Kubernetes Engine) | `rancher/k3s:latest` | Real k3s Kubernetes clusters reachable via kubectl | `FLOCI_GCP_SERVICES_GKE_MOCK` |
+| GKE (Kubernetes Engine) | `rancher/k3s:<release pinned per minor>` | Real k3s Kubernetes clusters reachable via kubectl, on the k3s release of the requested Kubernetes minor (1.32 to 1.37) | `FLOCI_GCP_SERVICES_GKE_MOCK` |
 | BigQuery | `floci/floci-duck:latest` | GoogleSQL queries executed on a DuckDB engine | `FLOCI_GCP_SERVICES_BIGQUERY_MOCK` |
 
 Docker-backed services require the Docker socket:
@@ -285,7 +285,8 @@ docker run -d --name floci-gcp \
 | `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES18_IMAGE` | `postgres:18.4-alpine` |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_MYSQL80_IMAGE` | `mysql:8.0.46` |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_MYSQL84_IMAGE` | `mysql:8.4.11` |
-| `FLOCI_GCP_SERVICES_GKE_DEFAULT_IMAGE` | `rancher/k3s:latest` |
+| `FLOCI_GCP_SERVICES_GKE_IMAGE_REPOSITORY` | `rancher/k3s` (tag pinned per Kubernetes minor) |
+| `FLOCI_GCP_SERVICES_GKE_DEFAULT_IMAGE` | _(none; forces one image on every GKE cluster)_ |
 | `FLOCI_GCP_SERVICES_BIGQUERY_DUCK_DEFAULT_IMAGE` | `floci/floci-duck:latest` |
 
 ## Persistence and Storage Modes

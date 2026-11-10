@@ -93,7 +93,7 @@ public class GkeClusterManager {
      * true and {@link #finalizeCluster} extracts the CA.
      */
     public void startCluster(StoredCluster cluster) {
-        String image = config.services().gke().defaultImage();
+        String image = imageFor(cluster.getCurrentMasterVersion());
         String containerName = ContainerStorageHelper.dockerName(config,
                 "gke-" + cluster.getProject() + "-" + cluster.getName());
 
@@ -110,6 +110,24 @@ public class GkeClusterManager {
             cluster.setHostPort(0);
             throw e;
         }
+    }
+
+    /**
+     * The k3s image for a GKE version: the release pinned for its minor, unless an image is forced for
+     * every cluster. A version whose minor is no longer supported (a cluster persisted by an older
+     * build) runs on the default release.
+     */
+    String imageFor(String version) {
+        Optional<String> forced = config.services().gke().defaultImage().filter(i -> !i.isBlank());
+        if (forced.isPresent()) {
+            return forced.get();
+        }
+        GkeReleases.Release release = GkeReleases.forVersion(version).orElseGet(() -> {
+            GkeReleases.Release fallback = GkeReleases.defaultRelease(Optional.empty());
+            LOG.warnv("GKE version {0} has no pinned k3s release; running {1}", version, fallback.k3sTag());
+            return fallback;
+        });
+        return config.services().gke().imageRepository() + ":" + release.k3sTag();
     }
 
     /**
@@ -176,6 +194,23 @@ public class GkeClusterManager {
     private static Map<String, String> identityFilter(StoredCluster cluster) {
         return ContainerStorageHelper.resourceIdentityLabels(
                 "gke", cluster.getName(), cluster.getProject(), cluster.getLocation());
+    }
+
+    /**
+     * Recreates the control plane container on the image of the cluster's current master version,
+     * keeping its data volume and host port, as an in-place k3s upgrade does. The cluster is not
+     * ready again until {@link #isReady} says so.
+     */
+    public void replaceControlPlane(StoredCluster cluster) {
+        if (cluster.getContainerId() != null) {
+            lifecycleManager.stopAndRemove(cluster.getContainerId(), null);
+            cluster.setContainerId(null);
+        }
+        String image = imageFor(cluster.getCurrentMasterVersion());
+        String containerName = ContainerStorageHelper.dockerName(config,
+                "gke-" + cluster.getProject() + "-" + cluster.getName());
+        LOG.infov("Recreating the control plane of GKE cluster {0} on image {1}", cluster.getName(), image);
+        launchContainer(cluster, image, containerName, cluster.getHostPort());
     }
 
     /**

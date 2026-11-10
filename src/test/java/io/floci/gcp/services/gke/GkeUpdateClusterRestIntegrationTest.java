@@ -27,7 +27,7 @@ class GkeUpdateClusterRestIntegrationTest {
 
         given()
                 .contentType("application/json")
-                .body("{\"cluster\":{\"name\":\"" + cluster + "\",\"initialClusterVersion\":\"1.29.0-gke.1\"}}")
+                .body("{\"cluster\":{\"name\":\"" + cluster + "\",\"initialClusterVersion\":\"1.34.0-gke.1\"}}")
                 .when().post(BASE + "/clusters")
                 .then()
                 .statusCode(200);
@@ -53,7 +53,7 @@ class GkeUpdateClusterRestIntegrationTest {
                 .statusCode(200)
                 .body("currentMasterVersion", equalTo(advertised))
                 .body("currentMasterVersion", not(equalTo("-")))
-                .body("currentNodeVersion", equalTo("1.29.0-gke.1"));
+                .body("currentNodeVersion", equalTo("1.34.0-gke.1"));
 
         // `gcloud container clusters upgrade C --node-pool default-pool` with no --cluster-version:
         // "-" on the node side means the cluster's master version.
@@ -81,7 +81,7 @@ class GkeUpdateClusterRestIntegrationTest {
         given()
                 .contentType("application/json")
                 .body("{\"cluster\":{\"name\":\"" + cluster
-                        + "\",\"initialClusterVersion\":\"1.29.0-gke.1\"}}")
+                        + "\",\"initialClusterVersion\":\"1.34.0-gke.1\"}}")
                 .when().post(BASE + "/clusters")
                 .then()
                 .statusCode(200);
@@ -100,7 +100,7 @@ class GkeUpdateClusterRestIntegrationTest {
 
         given()
                 .contentType("application/json")
-                .body("{\"update\":{\"desiredNodeVersion\":\"1.30.0-gke.1\",\"desiredMasterVersion\":123}}")
+                .body("{\"update\":{\"desiredNodeVersion\":\"1.35.0-gke.1\",\"desiredMasterVersion\":123}}")
                 .when().put(clusterPath)
                 .then()
                 .statusCode(400)
@@ -119,9 +119,9 @@ class GkeUpdateClusterRestIntegrationTest {
                 .when().get(clusterPath)
                 .then()
                 .statusCode(200)
-                .body("currentMasterVersion", equalTo("1.29.0-gke.1"))
-                .body("currentNodeVersion", equalTo("1.29.0-gke.1"))
-                .body("nodePools[0].version", equalTo("1.29.0-gke.1"));
+                .body("currentMasterVersion", equalTo("1.34.0-gke.1"))
+                .body("currentNodeVersion", equalTo("1.34.0-gke.1"))
+                .body("nodePools[0].version", equalTo("1.34.0-gke.1"));
     }
 
     @Test
@@ -131,7 +131,7 @@ class GkeUpdateClusterRestIntegrationTest {
 
         given()
                 .contentType("application/json")
-                .body("{\"cluster\":{\"name\":\"" + cluster + "\",\"initialClusterVersion\":\"1.29.0-gke.1\"}}")
+                .body("{\"cluster\":{\"name\":\"" + cluster + "\",\"initialClusterVersion\":\"1.34.0-gke.1\"}}")
                 .when().post(BASE + "/clusters")
                 .then()
                 .statusCode(200);

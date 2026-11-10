@@ -46,7 +46,6 @@ public class GkeService {
 
     private static final Logger LOG = Logger.getLogger(GkeService.class);
 
-    private static final String DEFAULT_MASTER_VERSION = "1.30.5-gke.1014001";
     private static final String DEFAULT_NODE_POOL_NAME = "default-pool";
     private static final Pattern VALID_CLUSTER_NAME =
             Pattern.compile("^[a-z](?:[a-z0-9-]{0,38}[a-z0-9])?$");
@@ -250,7 +249,7 @@ public class GkeService {
                 // owning cluster, which is where a pool created today gets them from anyway.
                 if (pool.getVersion() == null) {
                     pool.setVersion(cluster.getCurrentNodeVersion() != null
-                            ? cluster.getCurrentNodeVersion() : DEFAULT_MASTER_VERSION);
+                            ? cluster.getCurrentNodeVersion() : defaultVersion());
                 }
                 if (pool.getLocations() == null || pool.getLocations().isEmpty()) {
                     pool.setLocations(cluster.getLocations() != null && !cluster.getLocations().isEmpty()
@@ -314,6 +313,11 @@ public class GkeService {
         // persisted — so an invalid/duplicate name partway through the list can't leave a
         // half-created cluster behind that a retry then finds AlreadyExists against.
         validateNodePoolSpecs(clusterMap.get("nodePools"));
+        Optional<GkeReleases.Channel> channel = GkeReleases.channel(clusterMap.get("releaseChannel"));
+        String requestedVersion = optionalStringField(clusterMap, "initialClusterVersion");
+        String masterVersion = requestedVersion == null ? GkeReleases.defaultRelease(channel).gkeVersion()
+                : resolveVersion("initialClusterVersion", requestedVersion, "Master", channel);
+        validateNodePoolVersions(clusterMap.get("nodePools"), masterVersion, channel);
 
         StoredCluster cluster = new StoredCluster();
         cluster.setName(name);
@@ -322,7 +326,7 @@ public class GkeService {
         cluster.setZone(location);
         cluster.setDescription(stringField(clusterMap, "description", null));
         cluster.setCreateTime(Instant.now().toString());
-        cluster.setCurrentMasterVersion(stringField(clusterMap, "initialClusterVersion", DEFAULT_MASTER_VERSION));
+        cluster.setCurrentMasterVersion(masterVersion);
         // Seeds the pools created below; refreshCurrentNodeVersion then derives the aggregate
         // from them, so pools created with an explicit older version are reflected.
         cluster.setCurrentNodeVersion(cluster.getCurrentMasterVersion());
@@ -436,6 +440,7 @@ public class GkeService {
     public StoredOperation updateCluster(String project, String location, String clusterId,
                                          Map<String, Object> updateMap) {
         StoredCluster cluster = requireCluster(project, location, clusterId);
+        StoredOperation upgrade = null;
         if (updateMap != null) {
             // Both version fields are read through optionalStringField, not a cast: Terraform sends
             // desiredMasterVersion on cluster updates, and {"update": {"desiredMasterVersion": 123}}
@@ -454,7 +459,11 @@ public class GkeService {
             // Same aliases as UpdateMaster; gcloud sends "-" here for `clusters upgrade --master`
             // without --cluster-version, which stored verbatim left the cluster reporting "-".
             String masterVersion = desiredMasterVersion == null ? null
-                    : resolveMasterVersion("desiredMasterVersion", desiredMasterVersion);
+                    : resolveMasterVersion("desiredMasterVersion", desiredMasterVersion, cluster);
+            if (masterVersion != null) {
+                checkMasterUpgrade(cluster.getCurrentMasterVersion(), masterVersion);
+                requireReplaceableControlPlane(cluster, masterVersion);
+            }
             if (nodeVersion != null) {
                 // The pool carries its own `version`, and GetNodePool/ListNodePools read it from
                 // the pool store, so moving only the cluster aggregate would report the new
@@ -470,7 +479,8 @@ public class GkeService {
                         GkeVersions.minimum(poolVersions(project, location, clusterId)).orElse(nodeVersion));
             }
             if (masterVersion != null) {
-                cluster.setCurrentMasterVersion(masterVersion);
+                upgrade = moveControlPlane(project, location, clusterId, cluster, masterVersion,
+                        OperationType.UPDATE_CLUSTER);
             }
             if (updateMap.get("desiredLocations") != null) {
                 cluster.setLocations(stringListField(updateMap, "desiredLocations", cluster.getLocations()));
@@ -495,6 +505,9 @@ public class GkeService {
         }
         touch(cluster);
         clusterStore.put(clusterKey(project, location, clusterId), cluster);
+        if (upgrade != null) {
+            return upgrade;
+        }
         return operationService.createOperation(project, location, clusterId, OperationType.UPDATE_CLUSTER);
     }
 
@@ -515,10 +528,67 @@ public class GkeService {
         if (masterVersion == null) {
             throw GcpException.invalidArgument("masterVersion is required and must be a string");
         }
-        cluster.setCurrentMasterVersion(resolveMasterVersion("masterVersion", masterVersion));
+        String target = resolveMasterVersion("masterVersion", masterVersion, cluster);
+        checkMasterUpgrade(cluster.getCurrentMasterVersion(), target);
+        requireReplaceableControlPlane(cluster, target);
+        StoredOperation upgrade = moveControlPlane(project, location, clusterId, cluster, target,
+                OperationType.UPGRADE_MASTER);
+        if (upgrade != null) {
+            return upgrade;
+        }
         touch(cluster);
         clusterStore.put(clusterKey(project, location, clusterId), cluster);
         return operationService.createOperation(project, location, clusterId, OperationType.UPGRADE_MASTER);
+    }
+
+    /** A version whose image differs from the running one recreates the control plane, which only
+     * a {@code RUNNING} cluster can do; GKE likewise refuses an upgrade while another operation runs. */
+    private void requireReplaceableControlPlane(StoredCluster cluster, String target) {
+        if (needsNewControlPlane(cluster, target) && !"RUNNING".equals(cluster.getStatus())) {
+            throw GcpException.failedPrecondition("Cluster " + cluster.getName() + " is " + cluster.getStatus()
+                    + "; its control plane can only be upgraded while it is RUNNING.");
+        }
+    }
+
+    private boolean needsNewControlPlane(StoredCluster cluster, String target) {
+        return !mock() && !clusterManager.imageFor(target).equals(clusterManager.imageFor(cluster.getCurrentMasterVersion()));
+    }
+
+    /** Sets the control plane version. When the version runs on another k3s image the control plane
+     * container is recreated on it, keeping its data volume, and the returned operation stays
+     * {@code RUNNING} while the cluster is {@code RECONCILING}, until its API server answers again.
+     * Returns null when only the recorded version changes. */
+    private StoredOperation moveControlPlane(String project, String location, String clusterId, StoredCluster cluster,
+                                             String target, OperationType type) {
+        boolean replace = needsNewControlPlane(cluster, target);
+        cluster.setCurrentMasterVersion(target);
+        if (!replace) {
+            return null;
+        }
+        touch(cluster);
+        StoredOperation op = operationService.createRunningOperation(project, location, clusterId, type);
+        String key = clusterKey(project, location, clusterId);
+        synchronized (lifecycleLock) {
+            cluster.setStatus("RECONCILING");
+            cluster.setReconcileSince(Instant.now().toString());
+            cluster.setPendingOperation(op.getName());
+            clusterStore.put(key, cluster);
+        }
+        try {
+            clusterManager.replaceControlPlane(cluster);
+            clusterStore.put(key, cluster);
+        } catch (Exception e) {
+            String failure = "Could not upgrade the control plane of cluster " + clusterId + ": " + e.getMessage();
+            synchronized (lifecycleLock) {
+                cluster.setStatus("ERROR");
+                cluster.setStatusMessage(failure);
+                cluster.setReconcileSince(null);
+                cluster.setPendingOperation(null);
+                clusterStore.put(key, cluster);
+            }
+            operationService.completeOperation(op.getName(), operationError(Status.Code.INTERNAL, failure));
+        }
+        return operationService.getOperation(project, location, op.getName());
     }
 
     public StoredOperation setLabels(String project, String location, String clusterId,
@@ -640,28 +710,31 @@ public class GkeService {
     }
 
     /** {@code container.v1.ClusterManager.GetServerConfig} — the version/channel info gcloud
-     * and some SDKs check before create/upgrade calls. Versions are pinned to this emulator's
-     * single supported master/node version; there is no real multi-version fleet to report. */
+     * and some SDKs check before create/upgrade calls. Every version listed is one the emulator can
+     * run: one per Kubernetes minor {@link GkeReleases} pins a k3s release for. The default is the
+     * REGULAR channel's, as on GKE. */
     public Map<String, Object> getServerConfig() {
         Map<String, Object> config = new HashMap<>();
-        config.put("defaultClusterVersion", DEFAULT_MASTER_VERSION);
-        config.put("validNodeVersions", List.of(DEFAULT_MASTER_VERSION));
+        config.put("defaultClusterVersion", GkeReleases.defaultRelease(Optional.empty()).gkeVersion());
+        config.put("validNodeVersions", GkeReleases.validNodeVersions());
         config.put("defaultImageType", "COS_CONTAINERD");
         config.put("validImageTypes", List.of("COS_CONTAINERD", "UBUNTU_CONTAINERD"));
-        config.put("validMasterVersions", List.of(DEFAULT_MASTER_VERSION));
-        config.put("channels", List.of(
-                releaseChannelConfig("RAPID"),
-                releaseChannelConfig("REGULAR"),
-                releaseChannelConfig("STABLE")));
+        config.put("validMasterVersions", GkeReleases.validMasterVersions());
+        List<Map<String, Object>> channels = new ArrayList<>();
+        for (GkeReleases.Channel channel : GkeReleases.Channel.values()) {
+            channels.add(releaseChannelConfig(channel));
+        }
+        config.put("channels", channels);
         return config;
     }
 
-    private Map<String, Object> releaseChannelConfig(String channel) {
+    private Map<String, Object> releaseChannelConfig(GkeReleases.Channel channel) {
+        String defaultVersion = GkeReleases.defaultRelease(Optional.of(channel)).gkeVersion();
         Map<String, Object> config = new HashMap<>();
-        config.put("channel", channel);
-        config.put("defaultVersion", DEFAULT_MASTER_VERSION);
-        config.put("validVersions", List.of(DEFAULT_MASTER_VERSION));
-        config.put("upgradeTargetVersion", DEFAULT_MASTER_VERSION);
+        config.put("channel", channel.name());
+        config.put("defaultVersion", defaultVersion);
+        config.put("validVersions", GkeReleases.channelVersions(channel));
+        config.put("upgradeTargetVersion", defaultVersion);
         return config;
     }
 
@@ -867,6 +940,23 @@ public class GkeService {
         }
     }
 
+    /** Resolves the explicit {@code version} of every create-time node pool against the control plane
+     * version before anything is persisted, so a pool GKE would reject fails the whole create. */
+    private static void validateNodePoolVersions(Object requestedPools, String masterVersion,
+                                                 Optional<GkeReleases.Channel> channel) {
+        if (!(requestedPools instanceof List<?> list)) {
+            return;
+        }
+        for (Object poolObj : list) {
+            if (poolObj instanceof Map<?, ?> poolMap && poolMap.get("version") instanceof String version
+                    && !version.isBlank()) {
+                String resolved = "-".equals(version) ? masterVersion
+                        : resolveVersion("version", version, "Node", channel);
+                checkNodeSkew(resolved, masterVersion);
+            }
+        }
+    }
+
     private void createInitialNodePools(String project, String location, String clusterName,
                                         Map<String, Object> clusterMap) {
         Object requestedPools = clusterMap.get("nodePools");
@@ -917,13 +1007,17 @@ public class GkeService {
         pool.setLocations(stringListField(poolMap, "locations", List.of(location)));
         // Default the version from the owning cluster, not the build-time constant: after an
         // UpdateCluster carrying desiredNodeVersion, the cluster and its existing pools have
-        // moved off DEFAULT_MASTER_VERSION, and a pool created afterwards without an explicit
+        // moved off the default version, and a pool created afterwards without an explicit
         // version would otherwise come back on the old one and read as drift.
         String clusterNodeVersion = clusterStore.get(clusterKey(project, location, clusterId))
                 .map(StoredCluster::getCurrentNodeVersion)
                 .filter(v -> v != null && !v.isBlank())
-                .orElse(DEFAULT_MASTER_VERSION);
-        pool.setVersion(stringField(poolMap, "version", clusterNodeVersion));
+                .orElse(defaultVersion());
+        String requestedVersion = optionalStringField(poolMap, "version");
+        pool.setVersion(requestedVersion == null ? clusterNodeVersion
+                : clusterStore.get(clusterKey(project, location, clusterId))
+                        .map(cluster -> resolveNodeVersion("version", requestedVersion, cluster))
+                        .orElse(requestedVersion));
         pool.setStatus("RUNNING");
         pool.setSelfLink(nodePoolSelfLink(project, location, clusterId, name));
         pool.setEtag(newFingerprint());
@@ -984,38 +1078,46 @@ public class GkeService {
     }
 
     /** Resolves the version spellings {@code master_version} accepts (cluster_service.proto,
-     * {@code UpdateMasterRequest}): {@code "latest"} and {@code "-"} pick the highest valid and
-     * the default version respectively, and {@code "1.X"} / {@code "1.X.Y"} pick the highest
-     * valid version under that prefix. {@link #getServerConfig()} advertises exactly one valid
-     * master version, so every alias that matches it resolves to it. An explicit
-     * {@code 1.X.Y-gke.N} that is not the advertised one is kept verbatim, as {@code createCluster}
-     * and {@code UpdateCluster} already do, so clients pinning a specific version keep working
-     * against the emulator. A {@code 1.X} / {@code 1.X.Y} alias that matches no valid version is
-     * rejected (#231): the alias means "the highest valid version under this prefix", and when
-     * there is none there is nothing to pick, so storing it would make the emulator report a
-     * version its own {@code getServerConfig()} does not consider valid.
+     * {@code UpdateMasterRequest}): {@code "latest"} and {@code "-"} pick the highest valid and the
+     * default version of the cluster's release channel (REGULAR without one), and {@code "1.X"} /
+     * {@code "1.X.Y"} pick the version {@link GkeReleases} advertises for that minor when it matches.
+     * An explicit {@code 1.X.Y-gke.N} of a supported minor is kept verbatim even when it is not the
+     * advertised one, so clients pinning a specific version keep working; it runs on that minor's
+     * image. A supported minor is one {@link GkeReleases} pins a k3s release for; anything else is
+     * rejected the way GKE rejects a retired version.
      *
      * <p>Anything outside those five shapes is rejected. The prefix test alone would also accept
      * a bare major ({@code "1"} is a character prefix of {@code "1.30..."}), which the field does
-     * not document and real GKE rejects. {@code field} is the request field the value came from
-     * (four callers share this), so the rejection names the field the client actually sent. */
-    private static String resolveMasterVersion(String field, String requested) {
-        if ("latest".equals(requested) || "-".equals(requested)) {
-            return DEFAULT_MASTER_VERSION;
+     * not document and real GKE rejects. {@code field} is the request field the value came from,
+     * so the rejection names the field the client actually sent. */
+    private static String resolveVersion(String field, String requested, String kind,
+                                         Optional<GkeReleases.Channel> channel) {
+        if ("latest".equals(requested)) {
+            return GkeReleases.latestRelease(channel).gkeVersion();
+        }
+        if ("-".equals(requested)) {
+            return GkeReleases.defaultRelease(channel).gkeVersion();
         }
         if (VERSION_PREFIX_ALIAS.matcher(requested).matches()) {
-            if (DEFAULT_MASTER_VERSION.startsWith(requested + ".")
-                    || DEFAULT_MASTER_VERSION.startsWith(requested + "-")) {
-                return DEFAULT_MASTER_VERSION;
+            Optional<GkeReleases.Release> release = GkeReleases.forVersion(requested);
+            if (release.isPresent() && (requested.equals(release.get().minorVersion())
+                    || release.get().gkeVersion().startsWith(requested + "-"))) {
+                return release.get().gkeVersion();
             }
-            throw GcpException.invalidArgument("Invalid " + field + " \"" + requested
-                    + "\": no valid version matches this alias (valid: " + DEFAULT_MASTER_VERSION + ")");
+            throw GcpException.invalidArgument("No valid versions with the prefix \"" + requested + "\" found.");
         }
         if (EXPLICIT_VERSION.matcher(requested).matches()) {
-            return requested;
+            if (GkeReleases.forVersion(requested).isPresent()) {
+                return requested;
+            }
+            throw GcpException.invalidArgument(kind + " version \"" + requested + "\" is unsupported.");
         }
         throw GcpException.invalidArgument("Invalid " + field + " \"" + requested
                 + "\": expected \"latest\", \"-\", \"1.X\", \"1.X.Y\" or \"1.X.Y-gke.N\"");
+    }
+
+    private static String resolveMasterVersion(String field, String requested, StoredCluster cluster) {
+        return resolveVersion(field, requested, "Master", channelOf(cluster));
     }
 
     /** {@code desired_node_version} documents the same spellings as {@code master_version}
@@ -1024,7 +1126,55 @@ public class GkeService {
      * field. The proto allows one {@code ClusterUpdate} field per request, so this reads the
      * master version as stored, not one the same request might also be changing. */
     private static String resolveNodeVersion(String field, String requested, StoredCluster cluster) {
-        return "-".equals(requested) ? cluster.getCurrentMasterVersion() : resolveMasterVersion(field, requested);
+        String version = "-".equals(requested) ? cluster.getCurrentMasterVersion()
+                : resolveVersion(field, requested, "Node", channelOf(cluster));
+        checkNodeSkew(version, cluster.getCurrentMasterVersion());
+        return version;
+    }
+
+    /** Nodes never run a newer minor than the control plane, nor one more than two minors older
+     * (GKE "Upgrade a cluster": control planes are compatible with nodes up to two minor versions
+     * earlier). Versions the emulator cannot parse are left alone. */
+    private static void checkNodeSkew(String nodeVersion, String masterVersion) {
+        int node = GkeReleases.minorOf(nodeVersion);
+        int master = GkeReleases.minorOf(masterVersion);
+        if (node < 0 || master < 0) {
+            return;
+        }
+        if (node > master) {
+            throw GcpException.invalidArgument("Node version \"" + nodeVersion
+                    + "\" must not be newer than the control plane version \"" + masterVersion + "\".");
+        }
+        if (master - node > 2) {
+            throw GcpException.invalidArgument("Node version \"" + nodeVersion
+                    + "\" is more than two minor versions older than the control plane version \""
+                    + masterVersion + "\".");
+        }
+    }
+
+    /** The control plane moves up one minor at a time and never down a minor; a patch downgrade
+     * within its minor is allowed (GKE "Upgrade a cluster"). A cluster still on a minor this build no
+     * longer supports may move to any supported one. */
+    private static void checkMasterUpgrade(String current, String target) {
+        int from = GkeReleases.minorOf(current);
+        int to = GkeReleases.minorOf(target);
+        if (from < 0 || to < 0 || GkeReleases.forMinor(from).isEmpty()) {
+            return;
+        }
+        if (to < from) {
+            throw GcpException.invalidArgument("Master cannot be upgraded to \"" + target
+                    + "\": specified version is not newer than the current version.");
+        }
+        if (to > from + 1) {
+            throw GcpException.invalidArgument("Master cannot be upgraded to \"" + target
+                    + "\": the control plane can only be upgraded one minor version at a time, and it runs \""
+                    + current + "\".");
+        }
+    }
+
+    private static Optional<GkeReleases.Channel> channelOf(StoredCluster cluster) {
+        return GkeReleases.channel(cluster.getExtraConfig() == null ? null
+                : cluster.getExtraConfig().get("releaseChannel"));
     }
 
     /** The node pools an {@code UpdateCluster} carrying {@code desiredNodeVersion} upgrades.
@@ -1142,9 +1292,12 @@ public class GkeService {
                 cluster.setStatusMessage(failure);
             }
             cluster.setReconcileSince(null);
+            String pending = cluster.getPendingOperation();
+            cluster.setPendingOperation(null);
             clusterStore.put(key, cluster);
-            operationService.completeOperation(cluster.getCreateOperation(),
-                    failure == null ? null : operationError(Status.Code.INTERNAL, failure));
+            Map<String, Object> error = failure == null ? null : operationError(Status.Code.INTERNAL, failure);
+            operationService.completeOperation(cluster.getCreateOperation(), error);
+            operationService.completeOperation(pending, error);
         }
         if (failure == null) {
             LOG.infov("GKE cluster {0} is now RUNNING", seen.getName());
@@ -1174,6 +1327,10 @@ public class GkeService {
             return false;
         }
         return created.plus(STARTUP_TIMEOUT).isBefore(Instant.now());
+    }
+
+    private static String defaultVersion() {
+        return GkeReleases.defaultRelease(Optional.empty()).gkeVersion();
     }
 
     private boolean mock() {

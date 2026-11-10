@@ -169,7 +169,10 @@ floci-gcp:
     gke:
       enabled: true
       mock: false
-      default-image: "rancher/k3s:latest"
+      # Each cluster runs the rancher/k3s release pinned for its Kubernetes minor version.
+      image-repository: "rancher/k3s"
+      # Set to force one image on every cluster, whatever its version.
+      default-image:
       api-server-base-port: 6550
       api-server-max-port: 6599
       keep-running-on-shutdown: false

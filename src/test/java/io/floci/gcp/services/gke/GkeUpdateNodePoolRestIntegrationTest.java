@@ -26,7 +26,8 @@ class GkeUpdateNodePoolRestIntegrationTest {
 
         given()
                 .contentType("application/json")
-                .body("{\"cluster\":{\"name\":\"" + cluster + "\",\"initialClusterVersion\":\"1.29.0-gke.1\"}}")
+                .body("{\"cluster\":{\"name\":\"" + cluster + "\",\"initialClusterVersion\":\"1.36.1-gke.1\","
+                        + "\"nodePools\":[{\"name\":\"default-pool\",\"version\":\"1.34.0-gke.1\"}]}}")
                 .when().post(BASE + "/clusters")
                 .then()
                 .statusCode(200);
@@ -39,7 +40,7 @@ class GkeUpdateNodePoolRestIntegrationTest {
 
         given()
                 .contentType("application/json")
-                .body("{\"nodeVersion\":\"latest\"}")
+                .body("{\"nodeVersion\":\"1.35\"}")
                 .when().put(poolPath)
                 .then()
                 .statusCode(200)
@@ -50,7 +51,7 @@ class GkeUpdateNodePoolRestIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("version", equalTo(advertised))
-                .body("version", not(equalTo("latest")));
+                .body("version", not(equalTo("1.35")));
 
         // #233: the cluster aggregate follows its pools, so it moves with the only pool.
         given()
@@ -74,7 +75,7 @@ class GkeUpdateNodePoolRestIntegrationTest {
                 .when().get(poolPath)
                 .then()
                 .statusCode(200)
-                .body("version", equalTo("1.29.0-gke.1"));
+                .body("version", equalTo("1.36.1-gke.1"));
     }
 
     @Test

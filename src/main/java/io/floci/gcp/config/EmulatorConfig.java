@@ -353,8 +353,12 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean mock();
 
-        @WithDefault("rancher/k3s:latest")
-        String defaultImage();
+        /** Runs every cluster on this image instead of the k3s release pinned for its version. */
+        Optional<String> defaultImage();
+
+        /** Repository of the k3s images pinned per Kubernetes minor version. */
+        @WithDefault("rancher/k3s")
+        String imageRepository();
 
         @WithDefault("6550")
         int apiServerBasePort();

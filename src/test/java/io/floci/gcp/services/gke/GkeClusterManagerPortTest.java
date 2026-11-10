@@ -41,7 +41,7 @@ class GkeClusterManagerPortTest {
         }
         lifecycleManager = mock(ContainerLifecycleManager.class);
         config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().gke().defaultImage()).thenReturn("rancher/k3s:test");
+        when(config.services().gke().defaultImage()).thenReturn(Optional.of("rancher/k3s:test"));
         when(config.services().gke().apiServerBasePort()).thenReturn(port);
         when(config.services().gke().apiServerMaxPort()).thenReturn(port);
         when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
