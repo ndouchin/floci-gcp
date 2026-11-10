@@ -163,7 +163,7 @@ class GkeTest {
 
     @Test
     @Order(5)
-    void setNodePoolSizeReportsItsOwnOperationType() {
+    void setNodePoolSizeReportsItsOwnOperationType() throws InterruptedException {
         // The generated client parses operationType into the closed Operation.Type enum, so this
         // exercises the decode path, not just the string the emulator writes (#228).
         Operation op = client.setNodePoolSize(SetNodePoolSizeRequest.newBuilder()
@@ -171,8 +171,10 @@ class GkeTest {
                 .setNodeCount(3)
                 .build());
 
+        // A real cluster's resize runs until the new nodes are Ready.
         assertThat(op.getOperationType()).isEqualTo(Operation.Type.SET_NODE_POOL_SIZE);
-        assertThat(op.getStatus()).isEqualTo(Operation.Status.DONE);
+        assertThat(op.getStatus()).isIn(Operation.Status.RUNNING, Operation.Status.DONE);
+        assertThat(awaitDone(op).getStatusMessage()).isEmpty();
 
         NodePool pool = client.getNodePool(CLUSTER_NAME + "/nodePools/default-pool");
         assertThat(pool.getInitialNodeCount()).isEqualTo(3);

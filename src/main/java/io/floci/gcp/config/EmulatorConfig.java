@@ -369,6 +369,10 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean keepRunningOnShutdown();
 
+        /** Most node containers one cluster runs; node pools past it get fewer nodes than they ask for. */
+        @WithDefault("5")
+        int maxNodesPerCluster();
+
         @WithDefault("host")
         String endpointMode();
 

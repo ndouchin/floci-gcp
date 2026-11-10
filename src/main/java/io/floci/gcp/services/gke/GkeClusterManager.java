@@ -5,8 +5,13 @@ import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.Info;
+import com.github.dockerjava.api.model.Network;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.docker.ContainerBuilder;
 import io.floci.gcp.core.common.docker.ContainerDetector;
@@ -18,6 +23,7 @@ import io.floci.gcp.core.common.docker.DockerHostResolver;
 import io.floci.gcp.core.common.docker.PortAllocator;
 import io.floci.gcp.core.common.docker.RetryingTarCopier;
 import io.floci.gcp.services.gke.model.StoredCluster;
+import io.floci.gcp.services.gke.model.StoredNode;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -29,9 +35,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -53,6 +61,16 @@ public class GkeClusterManager {
      * live naming helper produces.
      */
     private static final String LEGACY_VOLUME_PREFIX = "floci-gke-";
+
+    static final String ROLE_LABEL = "io.floci.gke-role";
+    static final String ROLE_CONTROL_PLANE = "control-plane";
+    static final String ROLE_NODE = "node";
+    static final String NODE_POOL_LABEL = "io.floci.gke-node-pool";
+    static final String NODE_LABEL = "io.floci.gke-node";
+    private static final String K3S_DATA_DIR = "/var/lib/rancher/k3s";
+    private static final String TOKEN_PATH = K3S_DATA_DIR + "/server/token";
+    private static final int SERVER_HOST_OFFSET = 10;
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private static final String WEBHOOK_CONFIG_DIR = "/etc";
     private static final String WEBHOOK_CONFIG_FILE = "gke-token-webhook.yaml";
@@ -155,10 +173,18 @@ public class GkeClusterManager {
     public RestoreOutcome restoreCluster(StoredCluster cluster) {
         Optional<Container> survivor = lifecycleManager.listContainersByLabels("list GKE control plane containers",
                         identityFilter(cluster)).stream()
+                .filter(c -> !ROLE_NODE.equals(labelOf(c, ROLE_LABEL)))
                 .findFirst();
-        if (survivor.isPresent()) {
+        if (survivor.isPresent() && ROLE_CONTROL_PLANE.equals(labelOf(survivor.get(), ROLE_LABEL))
+                && cluster.getServerIp() != null) {
+            ensureNetwork(cluster);
             adoptControlPlane(cluster, survivor.get().getId());
             return RestoreOutcome.ADOPTED;
+        }
+        if (survivor.isPresent()) {
+            LOG.infov("GKE cluster {0} still runs a control plane that schedules its own workloads; replacing it "
+                    + "with one whose node pools run as separate nodes, on the same data volume", cluster.getName());
+            lifecycleManager.stopAndRemove(survivor.get().getId(), null);
         }
         boolean volumeSurvived = lifecycleManager.volumeExists(volumeName(cluster));
         cluster.setContainerId(null);
@@ -196,6 +222,131 @@ public class GkeClusterManager {
                 "gke", cluster.getName(), cluster.getProject(), cluster.getLocation());
     }
 
+    private static String labelOf(Container container, String key) {
+        return container.getLabels() == null ? null : container.getLabels().get(key);
+    }
+
+    String controlPlaneContainerName(StoredCluster cluster) {
+        return ContainerStorageHelper.dockerName(config, "gke-" + cluster.getProject() + "-" + cluster.getName());
+    }
+
+    /**
+     * Creates the cluster's own Docker network, holding its control plane and its nodes, unless it
+     * exists. The subnet Docker picks is recreated as a user-defined one so the control plane can keep
+     * a fixed address (the tenth of the subnet) it advertises to its nodes, whichever other networks
+     * it is attached to; dynamic addresses come from the upper half of the subnet only.
+     */
+    void ensureNetwork(StoredCluster cluster) {
+        String name = cluster.getNetworkName() != null ? cluster.getNetworkName() : controlPlaneContainerName(cluster);
+        cluster.setNetworkName(name);
+        Network existing = inspectNetwork(name);
+        if (existing != null) {
+            readSubnet(cluster, existing);
+            return;
+        }
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            String subnet = cluster.getNetworkSubnet();
+            String gateway = cluster.getNetworkGateway();
+            if (subnet == null || gateway == null) {
+                lifecycleManager.runDockerApi("create Docker network " + name, () -> lifecycleManager.getDockerClient()
+                        .createNetworkCmd().withName(name).withDriver("bridge")
+                        .withLabels(ContainerStorageHelper.defaultLabels(config)).exec());
+                Network probe = inspectNetwork(name);
+                removeNetwork(name);
+                if (probe == null || probe.getIpam() == null || probe.getIpam().getConfig() == null
+                        || probe.getIpam().getConfig().isEmpty()) {
+                    return;
+                }
+                subnet = probe.getIpam().getConfig().get(0).getSubnet();
+                gateway = probe.getIpam().getConfig().get(0).getGateway();
+            }
+            String finalSubnet = subnet;
+            String finalGateway = gateway;
+            try {
+                lifecycleManager.runDockerApi("create Docker network " + name, () -> lifecycleManager.getDockerClient()
+                        .createNetworkCmd().withName(name).withDriver("bridge")
+                        .withLabels(ContainerStorageHelper.defaultLabels(config))
+                        .withIpam(new Network.Ipam().withConfig(new Network.Ipam.Config()
+                                .withSubnet(finalSubnet).withGateway(finalGateway)
+                                .withIpRange(upperHalf(finalSubnet))))
+                        .exec());
+                cluster.setNetworkSubnet(subnet);
+                cluster.setNetworkGateway(gateway);
+                cluster.setServerIp(hostAddress(subnet, SERVER_HOST_OFFSET));
+                LOG.infov("Created Docker network {0} ({1}) for GKE cluster {2}", name, subnet, cluster.getName());
+                return;
+            } catch (RuntimeException e) {
+                LOG.infov("Docker network {0} could not take subnet {1} (attempt {2}): {3}", name, subnet,
+                        String.valueOf(attempt), e.getMessage());
+                cluster.setNetworkSubnet(null);
+                cluster.setNetworkGateway(null);
+            }
+        }
+        throw new IllegalStateException("Could not create Docker network " + name + " for GKE cluster "
+                + cluster.getName());
+    }
+
+    private void readSubnet(StoredCluster cluster, Network network) {
+        if (network.getIpam() == null || network.getIpam().getConfig() == null
+                || network.getIpam().getConfig().isEmpty()) {
+            return;
+        }
+        Network.Ipam.Config ipam = network.getIpam().getConfig().get(0);
+        cluster.setNetworkSubnet(ipam.getSubnet());
+        cluster.setNetworkGateway(ipam.getGateway());
+        if (cluster.getServerIp() == null && ipam.getIpRange() != null) {
+            cluster.setServerIp(hostAddress(ipam.getSubnet(), SERVER_HOST_OFFSET));
+        }
+    }
+
+    private Network inspectNetwork(String name) {
+        try {
+            return lifecycleManager.runDockerApi("inspect Docker network " + name,
+                    () -> lifecycleManager.getDockerClient().inspectNetworkCmd().withNetworkId(name).exec());
+        } catch (NotFoundException e) {
+            return null;
+        }
+    }
+
+    private void removeNetwork(String name) {
+        if (name == null) {
+            return;
+        }
+        try {
+            lifecycleManager.runDockerApi("remove Docker network " + name, () -> {
+                lifecycleManager.getDockerClient().removeNetworkCmd(name).exec();
+                return null;
+            });
+        } catch (NotFoundException e) {
+            LOG.debugv("Docker network {0} already removed", name);
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not remove Docker network {0}: {1}", name, e.getMessage());
+        }
+    }
+
+    static String upperHalf(String cidr) {
+        int prefix = Integer.parseInt(cidr.substring(cidr.indexOf('/') + 1));
+        long base = ipToLong(cidr.substring(0, cidr.indexOf('/')));
+        long half = 1L << (32 - prefix - 1);
+        return longToIp(base + half) + "/" + (prefix + 1);
+    }
+
+    static String hostAddress(String cidr, int offset) {
+        return longToIp(ipToLong(cidr.substring(0, cidr.indexOf('/'))) + offset);
+    }
+
+    private static long ipToLong(String ip) {
+        long value = 0;
+        for (String part : ip.split("\\.")) {
+            value = (value << 8) | Integer.parseInt(part);
+        }
+        return value;
+    }
+
+    private static String longToIp(long value) {
+        return ((value >> 24) & 0xff) + "." + ((value >> 16) & 0xff) + "." + ((value >> 8) & 0xff) + "." + (value & 0xff);
+    }
+
     /**
      * Recreates the control plane container on the image of the cluster's current master version,
      * keeping its data volume and host port, as an in-place k3s upgrade does. The cluster is not
@@ -224,6 +375,7 @@ public class GkeClusterManager {
         try {
             lifecycleManager.stopAndRemove(cluster.getContainerId(), null);
             lifecycleManager.removeVolume(volumeName(cluster));
+            removeNetwork(cluster.getNetworkName());
         } catch (RuntimeException e) {
             LOG.warnv("Could not remove k3s container {0} after a failed start of cluster {1}: {2}",
                     cluster.getContainerId(), cluster.getName(), e.getMessage());
@@ -241,8 +393,15 @@ public class GkeClusterManager {
         cluster.setVolumeName(volumeName);
         lifecycleManager.ensureVolume(volumeName);
 
+        ensureNetwork(cluster);
         List<String> serverArgs = new ArrayList<>(List.of(
-                "server", "--disable=traefik", "--tls-san=localhost"));
+                "server", "--disable-agent", "--egress-selector-mode=cluster",
+                "--disable=traefik", "--disable=local-storage",
+                "--tls-san=localhost", "--tls-san=" + containerName,
+                "--kube-apiserver-arg=enable-admission-plugins=ExtendedResourceToleration"));
+        if (cluster.getServerIp() != null) {
+            serverArgs.add("--advertise-address=" + cluster.getServerIp());
+        }
 
         // Wire a token-authentication webhook so the bearer token from gke-gcloud-auth-plugin
         // (i.e. `gcloud container clusters get-credentials` + kubectl) is validated by floci-gcp
@@ -256,6 +415,7 @@ public class GkeClusterManager {
                 .withNamedVolume(volumeName, "/var/lib/rancher/k3s")
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "gke", cluster.getName(), cluster.getProject(), cluster.getLocation()))
+                .withLabel(ROLE_LABEL, ROLE_CONTROL_PLANE)
                 .withDockerNetwork(config.services().gke().dockerNetwork())
                 .withPrivileged(true)
                 .withLogRotation();
@@ -270,6 +430,7 @@ public class GkeClusterManager {
         // create -> inject webhook kubeconfig -> start, so the file exists before the API server boots.
         String containerId = lifecycleManager.create(spec);
         cluster.setContainerId(containerId);
+        connectToClusterNetwork(cluster, containerId);
         if (webhookLocalFile != null) {
             copyWebhookIntoContainer(containerId, webhookLocalFile, cluster.getName());
         }
@@ -293,7 +454,222 @@ public class GkeClusterManager {
                 containerId, cluster.getName(), String.valueOf(hostPort));
     }
 
-    /** Polls the k3s API server's /livez endpoint to check readiness. */
+    /** What a node container is started with, besides its name and the cluster it joins. */
+    public record NodeLaunch(String pool, String image, GkeNodes.NodeSpec spec) {
+    }
+
+    /** A Kubernetes node as the control plane reports it. */
+    public record NodeState(boolean ready, Map<String, String> labels, int gpuCapacity) {
+    }
+
+    /** The CPUs and memory the Docker host gives containers, which every node's kubelet sees as its capacity. */
+    public record HostResources(int cpus, long memoryBytes) {
+    }
+
+    private volatile HostResources hostResources;
+
+    public HostResources hostResources() {
+        HostResources cached = hostResources;
+        if (cached != null) {
+            return cached;
+        }
+        Info info = lifecycleManager.runDockerApi("docker info", () -> lifecycleManager.getDockerClient().infoCmd().exec());
+        HostResources resources = info == null || info.getNCPU() == null || info.getMemTotal() == null
+                ? new HostResources(0, 0)
+                : new HostResources(info.getNCPU(), info.getMemTotal());
+        hostResources = resources;
+        return resources;
+    }
+
+    /** The token nodes join the cluster with, as the running control plane stores it. */
+    public String readToken(StoredCluster cluster) {
+        ContainerLifecycleManager.ExecResult result = lifecycleManager.exec(cluster.getContainerId(), List.of(),
+                List.of("cat", TOKEN_PATH));
+        if (result == null || result.exitCode() != 0 || result.stdout() == null || result.stdout().isBlank()) {
+            return null;
+        }
+        return result.stdout().trim();
+    }
+
+    String nodeContainerName(StoredCluster cluster, String nodeName) {
+        return ContainerStorageHelper.dockerName(config, "gke-" + cluster.getProject() + "-" + nodeName);
+    }
+
+    /**
+     * Starts the k3s agent container backing one node: on the cluster network, joining the control
+     * plane by its container name, registered under the node's GKE name with its labels, taints,
+     * provider ID and kubelet reservations, and limited to its machine type's CPUs and memory.
+     */
+    public void startNode(StoredCluster cluster, StoredNode node, NodeLaunch launch) {
+        String containerName = nodeContainerName(cluster, node.getName());
+        String volumeName = containerName;
+        node.setContainerName(containerName);
+        node.setVolumeName(volumeName);
+        node.setImage(launch.image());
+        lifecycleManager.removeIfExists(containerName);
+        lifecycleManager.ensureVolume(volumeName);
+
+        List<String> args = new ArrayList<>(List.of("agent", "--node-name=" + node.getName()));
+        launch.spec().labels().forEach((k, v) -> args.add("--node-label=" + k + "=" + v));
+        launch.spec().taints().forEach(t -> args.add("--node-taint=" + t));
+        launch.spec().kubeletArgs().forEach(a -> args.add("--kubelet-arg=" + a));
+
+        Map<String, String> labels = new HashMap<>(ContainerStorageHelper.resourceIdentityLabels(
+                "gke", cluster.getName(), cluster.getProject(), cluster.getLocation()));
+        labels.put(ROLE_LABEL, ROLE_NODE);
+        labels.put(NODE_POOL_LABEL, launch.pool());
+        labels.put(NODE_LABEL, node.getName());
+        ContainerBuilder.Builder builder = containerBuilder.newContainer(launch.image())
+                .withName(containerName)
+                .withEnv("K3S_URL", "https://" + controlPlaneContainerName(cluster) + ":" + K3S_API_SERVER_PORT)
+                .withEnv("K3S_TOKEN", cluster.getK3sToken())
+                .withNamedVolume(volumeName, K3S_DATA_DIR)
+                .withLabels(labels)
+                .withNetworkMode(cluster.getNetworkName())
+                .withPrivileged(true)
+                .withLogRotation()
+                .withCmd(args);
+        if (launch.spec().memoryBytes() > 0) {
+            builder.withMemoryBytes(launch.spec().memoryBytes());
+        }
+        if (launch.spec().cpus() > 0) {
+            builder.withNanoCpus(launch.spec().cpus() * 1_000_000_000L);
+        }
+        ContainerSpec spec = builder.build();
+        String containerId = lifecycleManager.create(spec);
+        node.setContainerId(containerId);
+        lifecycleManager.startCreated(containerId, spec);
+        LOG.infov("Started node {0} of GKE cluster {1} ({2})", node.getName(), cluster.getName(), launch.image());
+    }
+
+    /** Starts a node's surviving container if it is stopped; false when the container is gone. */
+    public boolean adoptNode(StoredNode node) {
+        String id = node.getContainerId() != null ? node.getContainerId() : node.getContainerName();
+        if (id == null) {
+            return false;
+        }
+        try {
+            lifecycleManager.adopt(id, List.of());
+            return true;
+        } catch (NotFoundException e) {
+            return false;
+        }
+    }
+
+    /** Removes a node's container and volume. */
+    public void removeNode(StoredNode node) {
+        String id = node.getContainerId() != null ? node.getContainerId() : node.getContainerName();
+        if (id != null) {
+            lifecycleManager.forceRemove(id, null);
+        }
+        if (node.getVolumeName() != null) {
+            lifecycleManager.removeVolume(node.getVolumeName());
+        }
+    }
+
+    /** Removes every node container of the cluster whose container name is not in {@code keep}, with its volume. */
+    public void removeNodeContainers(StoredCluster cluster, Set<String> keep) {
+        Map<String, String> filter = new HashMap<>(identityFilter(cluster));
+        filter.put(ROLE_LABEL, ROLE_NODE);
+        List<Container> containers = lifecycleManager.listContainersByLabels("list GKE node containers", filter);
+        if (containers == null) {
+            return;
+        }
+        for (Container container : containers) {
+            String name = container.getNames() == null || container.getNames().length == 0 ? null
+                    : container.getNames()[0].replaceFirst("^/", "");
+            if (name != null && keep.contains(name)) {
+                continue;
+            }
+            lifecycleManager.forceRemove(container.getId(), null);
+            if (name != null) {
+                lifecycleManager.removeVolume(name);
+            }
+            LOG.infov("Removed node container {0} of GKE cluster {1}", name, cluster.getName());
+        }
+    }
+
+    /** Runs kubectl in the control plane container. */
+    public ContainerLifecycleManager.ExecResult kubectl(StoredCluster cluster, List<String> args) {
+        List<String> command = new ArrayList<>();
+        command.add("kubectl");
+        command.addAll(args);
+        return lifecycleManager.exec(cluster.getContainerId(), List.of(), command);
+    }
+
+    /** The cluster's Kubernetes nodes by name, or null when the control plane cannot list them. */
+    public Map<String, NodeState> nodeStates(StoredCluster cluster) {
+        ContainerLifecycleManager.ExecResult result = kubectl(cluster, List.of("get", "nodes", "-o", "json"));
+        if (result == null || result.exitCode() != 0) {
+            return null;
+        }
+        try {
+            Map<String, NodeState> states = new HashMap<>();
+            for (JsonNode item : JSON.readTree(result.stdout()).path("items")) {
+                boolean ready = false;
+                for (JsonNode condition : item.path("status").path("conditions")) {
+                    if ("Ready".equals(condition.path("type").asText()) && "True".equals(condition.path("status").asText())) {
+                        ready = true;
+                    }
+                }
+                Map<String, String> labels = new HashMap<>();
+                item.path("metadata").path("labels").fields()
+                        .forEachRemaining(e -> labels.put(e.getKey(), e.getValue().asText()));
+                int gpus = item.path("status").path("capacity").path("nvidia.com/gpu").asInt(0);
+                states.put(item.path("metadata").path("name").asText(), new NodeState(ready, labels, gpus));
+            }
+            return states;
+        } catch (IOException e) {
+            LOG.debugv("Could not read the nodes of GKE cluster {0}: {1}", cluster.getName(), e.getMessage());
+            return null;
+        }
+    }
+
+    /** Deletes Kubernetes node objects whose agents are gone, with the node passwords k3s keeps for them. */
+    public void deleteKubernetesNodes(StoredCluster cluster, List<String> nodeNames) {
+        if (nodeNames.isEmpty() || cluster.getContainerId() == null) {
+            return;
+        }
+        List<String> args = new ArrayList<>(List.of("delete", "node", "--ignore-not-found", "--wait=false"));
+        args.addAll(nodeNames);
+        kubectl(cluster, args);
+        List<String> secrets = new ArrayList<>(List.of("-n", "kube-system", "delete", "secret", "--ignore-not-found",
+                "--wait=false"));
+        nodeNames.forEach(n -> secrets.add(n + ".node-password.k3s"));
+        kubectl(cluster, secrets);
+    }
+
+    /** Overwrites labels on a registered node, for those the k3s cloud controller rewrites at registration. */
+    public void labelNode(StoredCluster cluster, String nodeName, Map<String, String> labels) {
+        if (labels.isEmpty()) {
+            return;
+        }
+        List<String> args = new ArrayList<>(List.of("label", "node", nodeName, "--overwrite"));
+        labels.forEach((k, v) -> args.add(k + "=" + v));
+        kubectl(cluster, args);
+    }
+
+    /** Attaches the created, not yet started, control plane to the cluster network on its fixed address. */
+    private void connectToClusterNetwork(StoredCluster cluster, String containerId) {
+        if (cluster.getNetworkName() == null) {
+            return;
+        }
+        ContainerNetwork endpoint = new ContainerNetwork();
+        if (cluster.getServerIp() != null) {
+            endpoint.withIpamConfig(new ContainerNetwork.Ipam().withIpv4Address(cluster.getServerIp()));
+        }
+        lifecycleManager.runDockerApi("connect container " + containerId + " to network " + cluster.getNetworkName(),
+                () -> {
+                    lifecycleManager.getDockerClient().connectToNetworkCmd()
+                            .withContainerId(containerId)
+                            .withNetworkId(cluster.getNetworkName())
+                            .withContainerNetwork(endpoint)
+                            .exec();
+                    return null;
+                });
+    }
+
+    /** Polls the k3s API server's /readyz endpoint to check readiness. */
     public boolean isReady(StoredCluster cluster) {
         String endpoint = cluster.getInternalEndpoint() != null
                 ? cluster.getInternalEndpoint()
@@ -302,7 +678,7 @@ public class GkeClusterManager {
             return false;
         }
         try {
-            HttpURLConnection conn = (HttpURLConnection) URI.create(endpoint + "/livez").toURL().openConnection();
+            HttpURLConnection conn = (HttpURLConnection) URI.create(endpoint + "/readyz").toURL().openConnection();
             conn.setRequestMethod("GET");
             conn.setConnectTimeout(2000);
             conn.setReadTimeout(2000);
@@ -378,11 +754,13 @@ public class GkeClusterManager {
     }
 
     private void removeCluster(StoredCluster cluster) {
+        removeNodeContainers(cluster, Set.of());
         lifecycleManager.stopAndRemove(cluster.getContainerId(), null);
         lifecycleManager.removeVolume(volumeName(cluster));
         if (cluster.getHostPort() > 0) {
             portAllocator.release(cluster.getHostPort());
         }
+        removeNetwork(cluster.getNetworkName());
         LOG.infov("Stopped k3s container for cluster {0}", cluster.getName());
     }
 

@@ -55,10 +55,12 @@ class GkeClusterManagerRestoreTest {
     void aSurvivingControlPlaneContainerIsAdoptedOnItsPublishedPort() {
         Container container = mock(Container.class);
         when(container.getId()).thenReturn("survivor");
+        when(container.getLabels()).thenReturn(Map.of(GkeClusterManager.ROLE_LABEL, GkeClusterManager.ROLE_CONTROL_PLANE));
         when(lifecycleManager.listContainersByLabels(anyString(), anyMap())).thenReturn(List.of(container));
         when(lifecycleManager.adopt("survivor", List.of(6443))).thenReturn(new ContainerInfo("survivor",
                 Map.of(6443, new EndpointInfo("localhost", port)), Map.of(6443, port)));
         StoredCluster cluster = cluster();
+        cluster.setServerIp("172.18.0.10");
 
         GkeClusterManager.RestoreOutcome outcome = manager().restoreCluster(cluster);
 
@@ -68,6 +70,24 @@ class GkeClusterManagerRestoreTest {
         assertEquals("localhost:" + port, cluster.getEndpoint());
         assertThrows(RuntimeException.class, () -> portAllocator.allocate(port, port));
         verify(lifecycleManager, never()).create(any());
+    }
+
+    @Test
+    void aControlPlaneThatAlsoRanWorkloadsIsReplacedOnItsVolume() {
+        Container legacy = mock(Container.class);
+        when(legacy.getId()).thenReturn("legacy");
+        when(legacy.getLabels()).thenReturn(Map.of());
+        when(lifecycleManager.listContainersByLabels(anyString(), anyMap())).thenReturn(List.of(legacy));
+        when(lifecycleManager.volumeExists("floci-gcp-gke-p1-c1")).thenReturn(true);
+        when(lifecycleManager.create(any())).thenReturn("agentless");
+        when(lifecycleManager.startCreated(anyString(), any())).thenReturn(new ContainerInfo("agentless", Map.of()));
+        StoredCluster cluster = cluster();
+
+        GkeClusterManager.RestoreOutcome outcome = manager().restoreCluster(cluster);
+
+        assertEquals(GkeClusterManager.RestoreOutcome.RECREATED_ON_VOLUME, outcome);
+        verify(lifecycleManager).stopAndRemove("legacy", null);
+        assertEquals("agentless", cluster.getContainerId());
     }
 
     @Test

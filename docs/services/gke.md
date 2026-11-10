@@ -1,9 +1,10 @@
 # GKE (Kubernetes Engine)
 
 floci-gcp emulates the Google Kubernetes Engine control plane (`container.googleapis.com`,
-ClusterManager v1) over REST JSON. Cluster lifecycle is backed by real
-[k3s](https://k3s.io/) containers (`rancher/k3s`) started through the host Docker daemon,
-or a lightweight mock mode.
+ClusterManager v1) over REST JSON. Clusters are backed by real [k3s](https://k3s.io/)
+containers (`rancher/k3s`) started through the host Docker daemon: an agentless control plane
+on the k3s release of the cluster's Kubernetes version, and one k3s agent per node pool node.
+A lightweight mock mode keeps everything metadata-only.
 
 ## Configuration
 
@@ -17,6 +18,7 @@ or a lightweight mock mode.
 | `FLOCI_GCP_SERVICES_GKE_API_SERVER_MAX_PORT` | `6599` | End of the host port range |
 | `FLOCI_GCP_SERVICES_GKE_ENDPOINT_MODE` | `host` | How the cluster endpoint is advertised to `kubectl` (`host` for a reachable `host:port`) |
 | `FLOCI_GCP_SERVICES_GKE_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Leave spawned k3s containers running after floci-gcp shuts down |
+| `FLOCI_GCP_SERVICES_GKE_MAX_NODES_PER_CLUSTER` | `5` | Node containers one cluster runs at most (see [Nodes](#nodes-real-mode)) |
 | `FLOCI_GCP_SERVICES_GKE_DOCKER_NETWORK` | _(none)_ | Overrides `FLOCI_GCP_SERVICES_DOCKER_NETWORK` for GKE/k3s sidecars only |
 
 ## Routing: how clients reach GKE
@@ -203,25 +205,115 @@ cluster but never connect to its API server.
 Node pools are modeled as real, independent resources (not a static field on the cluster):
 `CreateCluster` provisions a `default-pool` node pool from the request's top-level
 `initialNodeCount`/`nodeConfig` (or from an explicit `nodePools[]` list), and it can be deleted
-and replaced with separately-managed pools — the standard
+and replaced with separately-managed pools: the standard
 `remove_default_node_pool = true` + standalone `google_container_node_pool` pattern used by
 Terraform, OpenTofu, and Pulumi all work end to end.
 
-`config`, `autoscaling`, `management`, `upgradeSettings` and `placementPolicy` are stored
-verbatim from the create/update request and echoed back unchanged on every read — floci-gcp does
-not run real node VMs or enforce autoscaling/repair/upgrade behavior, so there is nothing to act
-on semantically. This keeps every field a real client sends round-tripping consistently for
-Terraform's plan/refresh diff, without hand-modeling the full `NodeConfig` proto surface.
+`config`, `autoscaling`, `management`, `upgradeSettings`, `placementPolicy` and
+`maxPodsConstraint` are stored verbatim from the create/update request and echoed back unchanged on
+every read. Autoscaling, auto-repair and surge upgrades are not enforced.
 
-!!! warning "`node_count` drifts on every `terraform plan` unless you set `ignore_node_count_changes`"
-    Real GKE's Terraform provider computes the live `node_count` value by querying **Compute
-    Engine Instance Group Manager** target sizes for the node pool's `instanceGroupUrls` — not
-    from any field the NodePool API itself returns. floci-gcp does not emulate Compute Engine, so
-    `instanceGroupUrls` is always empty and the provider reads `node_count` back as `0`, which it
-    then wants to "correct" on every plan. Set `ignore_node_count_changes = true` on
-    `google_container_node_pool` resources to skip that IGM-based read entirely and use
-    `initial_node_count` as the source of truth instead (the provider's own documented escape
-    hatch for exactly this situation).
+### Nodes (real mode)
+
+On a real cluster every node of every pool is a node of the Kubernetes cluster:
+
+- **Control plane.** The k3s server runs with `--disable-agent --egress-selector-mode=cluster`, so
+  it schedules nothing itself and `kubectl get nodes` lists only pool nodes, as on GKE. It reaches
+  kubelets (logs, exec, metrics) through the agents' tunnels.
+- **One container per node.** Each node is a k3s agent container on the cluster's own Docker
+  network (`floci-gcp-[<namespace>-]gke-<project>-<cluster>`), which also holds the control plane
+  on a fixed address (the tenth of the network's subnet). The control plane is also attached to the
+  emulator's configured network when one is set, so the token webhook and in-Docker clients reach it
+  as before. Each node keeps its data in its own volume.
+- **Node counts.** A pool's `initialNodeCount` (and `SetNodePoolSize.nodeCount`) is per zone, as
+  on GKE: a regional cluster's pool runs that many nodes in each of its zones. Node zones are the
+  pool's `locations`, defaulting to the cluster's; a region stands for its `-a`, `-b` and `-c`
+  zones. `SetLocations` and `desiredLocations` move every pool to the new locations
+  ([About node pools](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/node-pools):
+  "three nodes in each of the cluster's compute zones"; "all of the node pools are replicated to
+  those zones").
+- **Node cap.** One cluster runs at most `FLOCI_GCP_SERVICES_GKE_MAX_NODES_PER_CLUSTER` node
+  containers (default 5). They go to pools in creation order, the `default-pool` first, round the
+  zones; pools past the cap run fewer nodes (possibly none) while the API still reports the
+  requested counts, and a WARN log line names the cap and the pools short of nodes.
+- **Status and operations.** A new pool is `PROVISIONING`, a resized, upgraded or moved one
+  `RECONCILING`, until all its nodes are Ready, then `RUNNING`; its `CreateNodePool`,
+  `SetNodePoolSize` or `UpdateNodePool` (version) operation stays `RUNNING` until then. A pool
+  with no node is `RUNNING` at once. `CreateCluster` finishes when the API server answers
+  `/readyz`, whatever the state of the nodes. `DeleteNodePool` removes the pool's containers and
+  Kubernetes nodes before it returns.
+- **Versions.** A pool's nodes run the k3s image of the pool's own `version`. A version on another
+  minor replaces the pool's nodes with new ones (new names), as a GKE node upgrade does.
+
+### Node names, provider IDs and instance groups
+
+Names follow what GKE shows in its instance groups and instances (for example
+`gke-gke2-default-pool-dabb2ff4-76fs` in an instance group
+`.../zones/europe-west4-a/instanceGroupManagers/gke-gke2-default-pool-dabb2ff4-grp`, in GKE API
+responses captured in Google's [gcpdiag test data](https://github.com/GoogleCloudPlatform/gcpdiag/tree/main/test-data/gke1/json-dumps)):
+
+- node: `gke-<cluster>-<pool>-<8 hex digits>-<4 characters>`, where the hex digits are one hash
+  per pool and zone and the last four characters are random. Cluster and pool names are shortened,
+  keeping their first characters, so the name fits 63 characters; GKE's own shortening rule is not
+  documented.
+- `spec.providerID`: `gce://<project>/<zone>/<node name>`, the GCE cloud provider's form.
+- `instanceGroupUrls`: one per zone,
+  `https://www.googleapis.com/compute/v1/projects/<project>/zones/<zone>/instanceGroupManagers/gke-<cluster>-<pool>-<hash>-grp`,
+  filled in mock and real mode. Compute Engine instance groups are not emulated behind them.
+
+!!! warning "Terraform `node_count` and `instanceGroupUrls`"
+    The `hashicorp/google` provider reads a node pool's live `node_count` by fetching each
+    `instanceGroupUrls` entry from the Compute API. Point `compute_custom_endpoint` at floci-gcp:
+    it answers `404` for instance group managers, which the provider treats as a stale URL and
+    skips, so `node_count` reads back as `0`; set `ignore_node_count_changes = true` (or ignore
+    `node_count` in `lifecycle`) to keep plans clean. Left on the real Compute endpoint, the
+    provider's lookup fails.
+
+### Node labels and taints
+
+Every node carries the labels GKE writes into a node's `kube-labels` (as seen in GKE instance
+templates in the same gcpdiag test data, and named in Google's
+[cluster autoscaler](https://github.com/GoogleCloudPlatform/cluster-autoscaler/blob/main/pkg/cloudprovider/gke/labels/system_labels.go)),
+plus the cloud provider's instance-type and topology labels:
+
+| Label | Value |
+|---|---|
+| `cloud.google.com/gke-nodepool` | pool name ([About node pools](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/node-pools)) |
+| `cloud.google.com/machine-family` | machine series, for example `e2` ([ComputeClasses](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/about-custom-compute-classes)) |
+| `cloud.google.com/gke-os-distribution` | `cos`, or `ubuntu` for `UBUNTU_CONTAINERD` |
+| `cloud.google.com/gke-container-runtime` | `containerd` |
+| `cloud.google.com/gke-boot-disk` | `config.diskType`, default `pd-balanced` |
+| `cloud.google.com/gke-max-pods-per-node` | `maxPodsConstraint.maxPodsPerNode`, else the cluster's `defaultMaxPodsConstraint`, else `110` |
+| `cloud.google.com/gke-provisioning` | `standard`, `spot` or `preemptible` |
+| `cloud.google.com/gke-spot` / `cloud.google.com/gke-preemptible` | `true` on Spot / preemptible pools |
+| `cloud.google.com/gke-cpu-scaling-level` | vCPU count |
+| `cloud.google.com/gke-logging-variant` | `DEFAULT` |
+| `cloud.google.com/gke-stack-type` | `IPV4` |
+| `cloud.google.com/private-node` | `false` |
+| `node.kubernetes.io/instance-type` | machine type |
+| `topology.kubernetes.io/region`, `topology.kubernetes.io/zone` | node region and zone |
+
+`config.labels` are added as node labels, and `config.taints` become node taints
+(`NO_SCHEDULE`, `PREFER_NO_SCHEDULE`, `NO_EXECUTE` map to `NoSchedule`, `PreferNoSchedule`,
+`NoExecute`). Labels and taints apply when a node registers; changing them on an existing pool
+does not relabel its nodes.
+
+### Node size
+
+The machine type (`config.machineType`, default `e2-medium`) sizes each node: the container is
+limited to its vCPUs and memory, and the kubelet reserves what GKE reserves, so a node's
+allocatable CPU and memory are GKE's for that machine type (`e2-medium`: 940m CPU, about 2.9 GiB)
+when the Docker host is at least that big. The reservations follow
+[Plan GKE Standard node sizes](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/plan-node-sizes)
+for node versions before 1.37.2-gke.1325000 (all versions this emulator advertises): CPU 6% of
+the first core, 1% of the second, 0.5% of the next two and 0.25% of the rest (1060 millicores on
+shared-core E2 types); memory 255 MiB under 1 GiB, else 25% of the first 4 GiB, 20% of the next 4,
+10% of the next 8, 6% of the next 112 and 2% above 128 GiB; plus a 100 MiB eviction threshold.
+The node's reported capacity is the Docker host's, as a kubelet in a container sees it. Machine
+types are read from their name (`<series>-standard|highmem|highcpu-<vCPUs>`); accelerator-optimized
+types use the vCPU and memory figures of
+[Accelerator-optimized machines](https://docs.cloud.google.com/compute/docs/accelerator-optimized-machines).
+A machine type the emulator cannot read runs unlimited.
 
 ## Supported Operations
 
@@ -285,25 +377,29 @@ both round-trip correctly through `extraConfig` like every other config
 block the emulator doesn't act on, so tooling that merely checks
 `cluster.autopilot.enabled` or `cluster.fleet.project` works correctly.
 
-All mutations return a synchronous, `DONE` Operation (no real long-running operation lifecycle) —
-consistent across every RPC above, not just cluster create/delete as before. The one exception is
-`CompleteNodePoolUpgrade`, which returns `google.protobuf.Empty` (`{}`) as the real API does.
+Mutations return a `DONE` Operation, except on real clusters where the runtime has work to finish:
+`CreateCluster`, a control plane upgrade onto another minor, `CreateNodePool`, `SetNodePoolSize`
+and an `UpdateNodePool` onto another minor return a `RUNNING` operation that finishes when the
+control plane or the pool's nodes are ready (see [Versions](#versions) and [Nodes](#nodes-real-mode)).
+`CompleteNodePoolUpgrade` returns `google.protobuf.Empty` (`{}`) as the real API does.
 
 `StartIPRotation`/`CompleteIPRotation` acknowledge the request (bumping the cluster's
 fingerprint/etag) rather than performing a real dual-certificate rotation window — there is no
 live client traffic to migrate off an old certificate in this emulator.
 `CompleteNodePoolUpgrade`/`RollbackNodePoolUpgrade` validate the node pool exists, then return
-`{}` and an Operation respectively; there is no real node-version upgrade in flight to complete or
-roll back, since node pools don't run real node VMs. `GetServerConfig` is described under
+`{}` and an Operation respectively; there is no surge upgrade in flight to complete or roll back.
+`GetServerConfig` is described under
 [Versions](#versions).
 
 ## Limitations
 
-- Operations resolve synchronously (no real long-running operation lifecycle, no `CancelOperation`).
+- Most operations resolve synchronously; on real clusters, cluster creation, control plane
+  upgrades, node pool creation, resizes and node version changes run until the runtime is ready.
+  `CancelOperation` is not implemented.
 - Node IAM is not modeled.
-- Real Autopilot node management and Compute Engine-backed node scaling (`node_count` read-back —
-  see the warning above) are out of scope; floci-gcp does not run real node VMs, so Autopilot mode
-  and Fleet registration round-trip as config but are not semantically enforced.
+- Real Autopilot node management, the cluster autoscaler and Compute Engine instance groups
+  (`node_count` read-back, see the warning above) are out of scope; Autopilot mode and Fleet
+  registration round-trip as config but are not semantically enforced.
 - Cluster-level config blocks the emulator doesn't act on semantically (network policy
   enforcement, binary authorization, private cluster networking, etc.) are stored and echoed back
   verbatim rather than enforced — see the `config`/`autoscaling`/`management` note under Node

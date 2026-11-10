@@ -10,6 +10,7 @@ import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.services.gke.model.StoredCluster;
+import io.floci.gcp.services.gke.model.StoredNode;
 import io.floci.gcp.services.gke.model.StoredNodePool;
 import io.floci.gcp.services.gke.operations.GkeOperationService;
 import io.floci.gcp.services.gke.operations.OperationType;
@@ -23,12 +24,15 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -77,6 +81,10 @@ public class GkeService {
      * one, and the readiness poller's outcome) so a pass that read an older record never writes
      * over a deleted or recreated one. Never held across Docker calls. */
     private final Object lifecycleLock = new Object();
+    /** Serializes the Docker work on one cluster's nodes (reconciles, pool and cluster deletes). Taken
+     * before {@link #lifecycleLock}, never while holding it. */
+    private final Map<String, Object> clusterLocks = new ConcurrentHashMap<>();
+    private final SecureRandom random = new SecureRandom();
     /** Create operations whose cluster has an unreadable {@code createTime}, already logged once. */
     private final Set<String> unreadableCreateTimes = ConcurrentHashMap.newKeySet();
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -181,16 +189,30 @@ public class GkeService {
                 current.setEndpoint(probe.getEndpoint());
                 current.setInternalEndpoint(probe.getInternalEndpoint());
                 current.setVolumeName(probe.getVolumeName());
+                current.setNetworkName(probe.getNetworkName());
+                current.setNetworkSubnet(probe.getNetworkSubnet());
+                current.setNetworkGateway(probe.getNetworkGateway());
+                current.setServerIp(probe.getServerIp());
                 if (failure != null) {
                     current.setStatus("ERROR");
                     current.setStatusMessage(failure);
                     operationService.completeOperation(current.getCreateOperation(),
                             operationError(Status.Code.INTERNAL, failure));
                     LOG.warnv("GKE cluster {0}: {1}", cluster.getName(), failure);
-                } else if (!"PROVISIONING".equals(current.getStatus())) {
-                    current.setStatus("RECONCILING");
-                    current.setReconcileSince(Instant.now().toString());
-                    LOG.infov("Restoring GKE cluster {0} ({1})", cluster.getName(), outcome);
+                } else {
+                    current.setNodesOutOfDate(true);
+                    if (!"PROVISIONING".equals(current.getStatus())) {
+                        current.setStatus("RECONCILING");
+                        current.setReconcileSince(Instant.now().toString());
+                        LOG.infov("Restoring GKE cluster {0} ({1})", cluster.getName(), outcome);
+                    }
+                    for (StoredNodePool pool : listNodePools(current.getProject(), current.getLocation(), current.getName())) {
+                        if ("RUNNING".equals(pool.getStatus()) && pool.getInitialNodeCount() > 0) {
+                            pool.setStatus("RECONCILING");
+                            nodePoolStore.put(nodePoolKey(current.getProject(), current.getLocation(),
+                                    current.getName(), pool.getName()), pool);
+                        }
+                    }
                 }
                 clusterStore.put(key, current);
             }
@@ -356,6 +378,7 @@ public class GkeService {
             cluster.setCreateOperation(op.getName());
         } else {
             cluster.setStatus("PROVISIONING");
+            cluster.setNodesOutOfDate(true);
             // CREATE_CLUSTER: "The cluster should be assumed to be unusable until the operation
             // finishes" (cluster_service.proto), so the operation stays RUNNING until the readiness
             // poller has the endpoint and CA in place. It exists before the cluster is stored so
@@ -417,7 +440,9 @@ public class GkeService {
         StoredCluster cluster = clusterStore.get(key)
                 .orElseThrow(() -> GcpException.notFound("Not found: cluster " + clusterId));
         if (!mock()) {
-            clusterManager.deleteCluster(cluster);
+            synchronized (clusterLock(key)) {
+                clusterManager.deleteCluster(cluster);
+            }
         }
         for (StoredNodePool pool : listNodePools(project, location, clusterId)) {
             nodePoolStore.delete(nodePoolKey(project, location, clusterId, pool.getName()));
@@ -484,6 +509,7 @@ public class GkeService {
             }
             if (updateMap.get("desiredLocations") != null) {
                 cluster.setLocations(stringListField(updateMap, "desiredLocations", cluster.getLocations()));
+                moveNodeLocations(project, location, clusterId, cluster);
             }
             if (desiredLoggingService != null) {
                 cluster.setLoggingService(desiredLoggingService);
@@ -650,6 +676,7 @@ public class GkeService {
                                         Map<String, Object> body) {
         StoredCluster cluster = requireCluster(project, location, clusterId);
         cluster.setLocations(stringListField(body == null ? Map.of() : body, "locations", cluster.getLocations()));
+        moveNodeLocations(project, location, clusterId, cluster);
         touch(cluster);
         clusterStore.put(clusterKey(project, location, clusterId), cluster);
         return operationService.createOperation(project, location, clusterId, OperationType.UPDATE_CLUSTER);
@@ -808,8 +835,55 @@ public class GkeService {
         StoredNodePool pool = createNodePoolInternal(project, location, clusterId, nodePoolMap);
         logIgnoredBetaFields("node pool " + pool.getName(), GkeBetaFields.setOnNodePool(nodePoolMap));
         refreshCurrentNodeVersion(project, location, clusterId, cluster);
-        return operationService.createNodePoolOperation(
-                project, location, clusterId, pool.getName(), OperationType.CREATE_NODE_POOL);
+        if (mock()) {
+            return operationService.createNodePoolOperation(
+                    project, location, clusterId, pool.getName(), OperationType.CREATE_NODE_POOL);
+        }
+        return awaitNodes(project, location, clusterId, pool, OperationType.CREATE_NODE_POOL);
+    }
+
+    /** Hands a pool whose nodes must change to the reconciler, with an operation that stays {@code RUNNING}
+     * until they are all Ready. */
+    private StoredOperation awaitNodes(String project, String location, String clusterId, StoredNodePool pool,
+                                       OperationType type) {
+        StoredOperation op = operationService.createRunningNodePoolOperation(project, location, clusterId,
+                pool.getName(), type);
+        String clusterKey = clusterKey(project, location, clusterId);
+        synchronized (lifecycleLock) {
+            operationService.completeOperation(pool.getPendingOperation(), null);
+            pool.setPendingOperation(op.getName());
+            if (!"PROVISIONING".equals(pool.getStatus())) {
+                pool.setStatus("RECONCILING");
+            }
+            nodePoolStore.put(nodePoolKey(project, location, clusterId, pool.getName()), pool);
+            clusterStore.get(clusterKey).ifPresent(cluster -> {
+                cluster.setNodesOutOfDate(true);
+                clusterStore.put(clusterKey, cluster);
+            });
+        }
+        return op;
+    }
+
+    /** {@code SetLocations} and {@code desiredLocations} move every node pool to the cluster's new node locations. */
+    private void moveNodeLocations(String project, String location, String clusterId, StoredCluster cluster) {
+        for (StoredNodePool pool : listNodePools(project, location, clusterId)) {
+            pool.setLocations(cluster.getLocations() == null ? List.of(location) : List.copyOf(cluster.getLocations()));
+            pool.setInstanceGroupUrls(instanceGroupUrls(project, location, clusterId, pool));
+            if (!mock() && !"PROVISIONING".equals(pool.getStatus())) {
+                pool.setStatus("RECONCILING");
+            }
+            nodePoolStore.put(nodePoolKey(project, location, clusterId, pool.getName()), pool);
+        }
+        if (!mock()) {
+            cluster.setNodesOutOfDate(true);
+        }
+    }
+
+    private static List<String> instanceGroupUrls(String project, String location, String clusterId,
+                                                  StoredNodePool pool) {
+        return GkeNodes.zones(pool.getLocations(), location).stream()
+                .map(zone -> GkeNodes.instanceGroupUrl(project, zone, clusterId, pool.getName()))
+                .toList();
     }
 
     public StoredNodePool getNodePool(String project, String location, String clusterId, String nodePoolId) {
@@ -826,8 +900,20 @@ public class GkeService {
 
     public StoredOperation deleteNodePool(String project, String location, String clusterId, String nodePoolId) {
         String key = nodePoolKey(project, location, clusterId, nodePoolId);
-        if (nodePoolStore.get(key).isEmpty()) {
-            throw GcpException.notFound("Not found: nodePool " + nodePoolId);
+        StoredNodePool doomed = nodePoolStore.get(key)
+                .orElseThrow(() -> GcpException.notFound("Not found: nodePool " + nodePoolId));
+        String clusterKey = clusterKey(project, location, clusterId);
+        if (!mock()) {
+            synchronized (clusterLock(clusterKey)) {
+                removeNodes(clusterStore.get(clusterKey).orElse(null), doomed.getNodes());
+                nodePoolStore.delete(key);
+                clusterStore.get(clusterKey).ifPresent(cluster -> {
+                    cluster.setNodesOutOfDate(true);
+                    clusterStore.put(clusterKey, cluster);
+                });
+            }
+            operationService.completeOperation(doomed.getPendingOperation(), operationError(Status.Code.CANCELLED,
+                    "Node pool " + nodePoolId + " was deleted"));
         }
         nodePoolStore.delete(key);
         clusterStore.get(clusterKey(project, location, clusterId))
@@ -848,10 +934,13 @@ public class GkeService {
                                           Map<String, Object> body) {
         StoredCluster cluster = requireCluster(project, location, clusterId);
         StoredNodePool pool = requireNodePool(project, location, clusterId, nodePoolId);
+        boolean newImage = false;
         if (body != null) {
             String nodeVersion = optionalStringField(body, "nodeVersion");
             if (nodeVersion != null) {
-                pool.setVersion(resolveNodeVersion("nodeVersion", nodeVersion, cluster));
+                String resolved = resolveNodeVersion("nodeVersion", nodeVersion, cluster);
+                newImage = !mock() && !clusterManager.imageFor(resolved).equals(clusterManager.imageFor(pool.getVersion()));
+                pool.setVersion(resolved);
             }
             if (body.get("upgradeSettings") != null) {
                 pool.setUpgradeSettings(asMap(body.get("upgradeSettings")));
@@ -860,6 +949,9 @@ public class GkeService {
         pool.setEtag(newFingerprint());
         nodePoolStore.put(nodePoolKey(project, location, clusterId, nodePoolId), pool);
         refreshCurrentNodeVersion(project, location, clusterId, cluster);
+        if (newImage) {
+            return awaitNodes(project, location, clusterId, pool, OperationType.UPGRADE_NODES);
+        }
         return operationService.createNodePoolOperation(
                 project, location, clusterId, nodePoolId, OperationType.UPGRADE_NODES);
     }
@@ -888,11 +980,18 @@ public class GkeService {
                                            String nodePoolId, Map<String, Object> body) {
         StoredNodePool pool = requireNodePool(project, location, clusterId, nodePoolId);
         Object nodeCount = body == null ? null : body.get("nodeCount");
+        if (nodeCount instanceof Number n && n.intValue() < 0) {
+            throw GcpException.invalidArgument("nodeCount must not be negative");
+        }
+        boolean resized = nodeCount instanceof Number n && n.intValue() != pool.getInitialNodeCount();
         if (nodeCount instanceof Number n) {
             pool.setInitialNodeCount(n.intValue());
         }
         pool.setEtag(newFingerprint());
         nodePoolStore.put(nodePoolKey(project, location, clusterId, nodePoolId), pool);
+        if (resized && !mock()) {
+            return awaitNodes(project, location, clusterId, pool, OperationType.SET_NODE_POOL_SIZE);
+        }
         return operationService.createNodePoolOperation(
                 project, location, clusterId, nodePoolId, OperationType.SET_NODE_POOL_SIZE);
     }
@@ -1004,7 +1103,11 @@ public class GkeService {
         pool.setClusterId(clusterId);
         Object initialNodeCount = poolMap.get("initialNodeCount");
         pool.setInitialNodeCount(initialNodeCount instanceof Number n ? n.intValue() : 3);
-        pool.setLocations(stringListField(poolMap, "locations", List.of(location)));
+        List<String> clusterLocations = clusterStore.get(clusterKey(project, location, clusterId))
+                .map(StoredCluster::getLocations)
+                .filter(l -> l != null && !l.isEmpty())
+                .orElse(List.of(location));
+        pool.setLocations(stringListField(poolMap, "locations", List.copyOf(clusterLocations)));
         // Default the version from the owning cluster, not the build-time constant: after an
         // UpdateCluster carrying desiredNodeVersion, the cluster and its existing pools have
         // moved off the default version, and a pool created afterwards without an explicit
@@ -1018,10 +1121,12 @@ public class GkeService {
                 : clusterStore.get(clusterKey(project, location, clusterId))
                         .map(cluster -> resolveNodeVersion("version", requestedVersion, cluster))
                         .orElse(requestedVersion));
-        pool.setStatus("RUNNING");
+        pool.setStatus(mock() ? "RUNNING" : "PROVISIONING");
+        pool.setCreateTime(Instant.now().toString());
         pool.setSelfLink(nodePoolSelfLink(project, location, clusterId, name));
         pool.setEtag(newFingerprint());
-        pool.setInstanceGroupUrls(List.of());
+        pool.setInstanceGroupUrls(instanceGroupUrls(project, location, clusterId, pool));
+        pool.setMaxPodsConstraint(asMap(poolMap.get("maxPodsConstraint")));
         pool.setConditions(List.of());
         pool.setConfig(asMap(poolMap.get("config")));
         pool.setAutoscaling(asMap(poolMap.get("autoscaling")));
@@ -1245,6 +1350,270 @@ public class GkeService {
                 }
             }
         }
+        for (StoredCluster cluster : clusterStore.scan(k -> true)) {
+            if ("RUNNING".equals(cluster.getStatus())) {
+                try {
+                    reconcileNodes(cluster.getProject(), cluster.getLocation(), cluster.getName());
+                } catch (Exception e) {
+                    LOG.errorv(e, "Error reconciling the nodes of GKE cluster {0}", cluster.getName());
+                }
+            }
+        }
+    }
+
+    private Object clusterLock(String clusterKey) {
+        return clusterLocks.computeIfAbsent(clusterKey, k -> new Object());
+    }
+
+    /** Node pools in the order the node cap serves them: the default pool first, then by creation. */
+    private List<StoredNodePool> orderedPools(String project, String location, String clusterId) {
+        return listNodePools(project, location, clusterId).stream()
+                .sorted(Comparator.comparing((StoredNodePool p) -> !GkeNodes.DEFAULT_POOL.equals(p.getName()))
+                        .thenComparing(p -> p.getCreateTime() == null ? "" : p.getCreateTime())
+                        .thenComparing(StoredNodePool::getName))
+                .toList();
+    }
+
+    /**
+     * Brings a running cluster's node containers in line with its node pools, then moves pools whose
+     * nodes are all Ready to {@code RUNNING}. Nothing happens for a cluster whose pools are all
+     * {@code RUNNING} and whose nodes nobody changed. Runs on the poller thread.
+     */
+    void reconcileNodes(String project, String location, String clusterId) {
+        if (mock()) {
+            return;
+        }
+        String key = clusterKey(project, location, clusterId);
+        synchronized (clusterLock(key)) {
+            StoredCluster cluster = clusterStore.get(key).orElse(null);
+            if (cluster == null || !"RUNNING".equals(cluster.getStatus())) {
+                return;
+            }
+            List<StoredNodePool> pools = orderedPools(project, location, clusterId);
+            if (cluster.isNodesOutOfDate() && !applyNodePlan(cluster, pools)) {
+                return;
+            }
+            settleNodePools(cluster, orderedPools(project, location, clusterId));
+        }
+    }
+
+    /** Creates, adopts and removes node containers so each pool runs its share of the node cap. False
+     * when the control plane cannot hand out its join token yet. */
+    private boolean applyNodePlan(StoredCluster cluster, List<StoredNodePool> pools) {
+        String project = cluster.getProject();
+        String location = cluster.getLocation();
+        String clusterId = cluster.getName();
+        String token = clusterManager.readToken(cluster);
+        if (token == null) {
+            return false;
+        }
+        if (cluster.getK3sToken() != null && !token.equals(cluster.getK3sToken())) {
+            LOG.warnv("The control plane of GKE cluster {0} started over with a new identity; recreating its nodes",
+                    clusterId);
+            for (StoredNodePool pool : pools) {
+                removeNodes(cluster, pool.getNodes());
+                pool.setNodes(new ArrayList<>());
+                nodePoolStore.put(nodePoolKey(project, location, clusterId, pool.getName()), pool);
+            }
+        }
+        cluster.setK3sToken(token);
+
+        List<GkeNodes.PoolDemand> demands = pools.stream()
+                .map(p -> new GkeNodes.PoolDemand(p.getName(), p.getInitialNodeCount(),
+                        GkeNodes.zones(p.getLocations(), location)))
+                .toList();
+        int cap = config.services().gke().maxNodesPerCluster();
+        List<GkeNodes.PoolAllocation> allocations = GkeNodes.allocate(demands, cap);
+        Set<String> keep = new HashSet<>();
+        List<String> shortPools = new ArrayList<>();
+        for (int i = 0; i < pools.size(); i++) {
+            StoredNodePool pool = pools.get(i);
+            GkeNodes.PoolAllocation allocation = allocations.get(i);
+            if (allocation.shortOfNodes()) {
+                shortPools.add(pool.getName() + " (" + allocation.nodeZones().size() + " of " + allocation.requested() + ")");
+            }
+            reconcilePool(cluster, pool, allocation.nodeZones());
+            for (StoredNode node : pool.getNodes()) {
+                keep.add(node.getContainerName());
+            }
+        }
+        clusterManager.removeNodeContainers(cluster, keep);
+        if (!shortPools.isEmpty()) {
+            LOG.warnv("GKE cluster {0} runs at most {1} node containers (floci-gcp.services.gke.max-nodes-per-cluster); "
+                    + "these node pools run fewer nodes than they report: {2}", clusterId, String.valueOf(cap),
+                    String.join(", ", shortPools));
+        }
+        String key = clusterKey(project, location, clusterId);
+        synchronized (lifecycleLock) {
+            clusterStore.get(key).ifPresent(current -> {
+                current.setK3sToken(token);
+                current.setNodesOutOfDate(false);
+                clusterStore.put(key, current);
+            });
+        }
+        return true;
+    }
+
+    /** Keeps the pool's live nodes that match its version and zones, removes the rest, and starts the missing ones. */
+    private void reconcilePool(StoredCluster cluster, StoredNodePool pool, List<String> zones) {
+        String poolKey = nodePoolKey(cluster.getProject(), cluster.getLocation(), cluster.getName(), pool.getName());
+        String image = clusterManager.imageFor(pool.getVersion());
+        Map<String, Integer> wanted = new LinkedHashMap<>();
+        zones.forEach(zone -> wanted.merge(zone, 1, Integer::sum));
+        List<StoredNode> kept = new ArrayList<>();
+        List<StoredNode> dropped = new ArrayList<>();
+        for (StoredNode node : pool.getNodes() == null ? List.<StoredNode>of() : pool.getNodes()) {
+            int room = wanted.getOrDefault(node.getZone(), 0);
+            if (room > 0 && image.equals(node.getImage()) && clusterManager.adoptNode(node)) {
+                kept.add(node);
+                wanted.put(node.getZone(), room - 1);
+            } else {
+                dropped.add(node);
+            }
+        }
+        removeNodes(cluster, dropped);
+        boolean changed = !dropped.isEmpty();
+        pool.setNodes(new ArrayList<>(kept));
+        GkeClusterManager.HostResources host = clusterManager.hostResources();
+        for (Map.Entry<String, Integer> slot : wanted.entrySet()) {
+            for (int i = 0; i < slot.getValue(); i++) {
+                String zone = slot.getKey();
+                String hash = GkeNodes.instanceGroupHash(cluster.getProject(), cluster.getName(), pool.getName(), zone);
+                StoredNode node = new StoredNode(GkeNodes.nodeName(cluster.getName(), pool.getName(), hash,
+                        uniqueSuffix(pool)), zone);
+                GkeNodes.NodeSpec spec = GkeNodes.spec(cluster.getProject(), pool.getName(), zone, node.getName(),
+                        pool.getConfig(), maxPods(cluster, pool), host.cpus(), host.memoryBytes());
+                pool.getNodes().add(node);
+                try {
+                    clusterManager.startNode(cluster, node, new GkeClusterManager.NodeLaunch(pool.getName(), image, spec));
+                } catch (Exception e) {
+                    pool.getNodes().remove(node);
+                    removeNodes(cluster, List.of(node));
+                    failPool(cluster, pool, "Could not start node " + node.getName() + ": " + e.getMessage());
+                    return;
+                }
+                changed = true;
+                nodePoolStore.put(poolKey, pool);
+            }
+        }
+        if (changed && "RUNNING".equals(pool.getStatus())) {
+            pool.setStatus("RECONCILING");
+        }
+        nodePoolStore.put(poolKey, pool);
+    }
+
+    private String uniqueSuffix(StoredNodePool pool) {
+        String alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+        while (true) {
+            StringBuilder suffix = new StringBuilder();
+            for (int i = 0; i < 4; i++) {
+                suffix.append(alphabet.charAt(random.nextInt(alphabet.length())));
+            }
+            String candidate = suffix.toString();
+            if (pool.getNodes() == null || pool.getNodes().stream().noneMatch(n -> n.getName().endsWith("-" + candidate))) {
+                return candidate;
+            }
+        }
+    }
+
+    private static int maxPods(StoredCluster cluster, StoredNodePool pool) {
+        Object poolMax = pool.getMaxPodsConstraint() == null ? null : pool.getMaxPodsConstraint().get("maxPodsPerNode");
+        Object clusterMax = cluster.getExtraConfig() != null
+                && cluster.getExtraConfig().get("defaultMaxPodsConstraint") instanceof Map<?, ?> m
+                ? m.get("maxPodsPerNode") : null;
+        return GkeNodes.intValue(poolMax, GkeNodes.intValue(clusterMax, GkeNodes.DEFAULT_MAX_PODS));
+    }
+
+    private void removeNodes(StoredCluster cluster, List<StoredNode> nodes) {
+        if (nodes == null || nodes.isEmpty()) {
+            return;
+        }
+        List<String> names = new ArrayList<>();
+        for (StoredNode node : nodes) {
+            try {
+                clusterManager.removeNode(node);
+            } catch (Exception e) {
+                LOG.warnv("Could not remove the container of node {0}: {1}", node.getName(), e.getMessage());
+            }
+            names.add(node.getName());
+        }
+        if (cluster != null && "RUNNING".equals(cluster.getStatus())) {
+            try {
+                clusterManager.deleteKubernetesNodes(cluster, names);
+            } catch (Exception e) {
+                LOG.warnv("Could not delete nodes {0} from GKE cluster {1}: {2}", names, cluster.getName(), e.getMessage());
+            }
+        }
+    }
+
+    private void failPool(StoredCluster cluster, StoredNodePool pool, String failure) {
+        LOG.warnv("Node pool {0} of GKE cluster {1}: {2}", pool.getName(), cluster.getName(), failure);
+        pool.setStatus("ERROR");
+        pool.setStatusMessage(failure);
+        String pending = pool.getPendingOperation();
+        pool.setPendingOperation(null);
+        nodePoolStore.put(nodePoolKey(cluster.getProject(), cluster.getLocation(), cluster.getName(), pool.getName()), pool);
+        operationService.completeOperation(pending, operationError(Status.Code.INTERNAL, failure));
+    }
+
+    /** Moves each provisioning or reconciling pool to {@code RUNNING} once every one of its nodes is Ready. */
+    private void settleNodePools(StoredCluster cluster, List<StoredNodePool> pools) {
+        List<StoredNodePool> waiting = pools.stream()
+                .filter(p -> "PROVISIONING".equals(p.getStatus()) || "RECONCILING".equals(p.getStatus()))
+                .toList();
+        if (waiting.isEmpty()) {
+            return;
+        }
+        Map<String, GkeClusterManager.NodeState> states = null;
+        for (StoredNodePool pool : waiting) {
+            List<StoredNode> nodes = pool.getNodes() == null ? List.of() : pool.getNodes();
+            if (!nodes.isEmpty()) {
+                if (states == null) {
+                    states = clusterManager.nodeStates(cluster);
+                    if (states == null) {
+                        return;
+                    }
+                }
+                if (!nodesReady(cluster, pool, nodes, states)) {
+                    continue;
+                }
+            }
+            String pending = pool.getPendingOperation();
+            pool.setStatus("RUNNING");
+            pool.setStatusMessage(null);
+            pool.setPendingOperation(null);
+            nodePoolStore.put(nodePoolKey(cluster.getProject(), cluster.getLocation(), cluster.getName(), pool.getName()),
+                    pool);
+            operationService.completeOperation(pending, null);
+            LOG.infov("Node pool {0} of GKE cluster {1} is RUNNING with {2} node(s)", pool.getName(), cluster.getName(),
+                    String.valueOf(nodes.size()));
+        }
+    }
+
+    /** Whether every node of the pool is registered and Ready, putting back the labels the k3s cloud
+     * controller overwrites when a node registers. */
+    private boolean nodesReady(StoredCluster cluster, StoredNodePool pool, List<StoredNode> nodes,
+                               Map<String, GkeClusterManager.NodeState> states) {
+        boolean ready = true;
+        for (StoredNode node : nodes) {
+            GkeClusterManager.NodeState state = states.get(node.getName());
+            if (state == null || !state.ready()) {
+                ready = false;
+                continue;
+            }
+            Map<String, String> expected = GkeNodes.spec(cluster.getProject(), pool.getName(), node.getZone(),
+                    node.getName(), pool.getConfig(), maxPods(cluster, pool), 0, 0).labels();
+            Map<String, String> drifted = new HashMap<>();
+            expected.forEach((k, v) -> {
+                if (!v.equals(state.labels().get(k))) {
+                    drifted.put(k, v);
+                }
+            });
+            if (!drifted.isEmpty()) {
+                clusterManager.labelNode(cluster, node.getName(), drifted);
+            }
+        }
+        return ready;
     }
 
     /**

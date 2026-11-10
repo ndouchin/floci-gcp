@@ -5,6 +5,7 @@ import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.gke.model.StoredCluster;
+import io.floci.gcp.services.gke.model.StoredNode;
 import io.floci.gcp.services.gke.model.StoredNodePool;
 import io.floci.gcp.services.gke.operations.GkeOperationService;
 import io.floci.gcp.services.gke.operations.OperationType;
@@ -18,8 +19,11 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -32,6 +36,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -77,7 +82,19 @@ class GkeServiceTest {
         when(config.services()).thenReturn(services);
         when(services.gke()).thenReturn(gkeConfig);
         when(gkeConfig.mock()).thenReturn(true);
+        when(gkeConfig.maxNodesPerCluster()).thenReturn(5);
         when(config.baseUrl()).thenReturn("http://localhost:4588");
+        when(clusterManager.imageFor(any())).thenAnswer(inv -> "k3s:" + GkeReleases.minorOf(inv.getArgument(0)));
+        when(clusterManager.hostResources()).thenReturn(new GkeClusterManager.HostResources(6, 10L << 30));
+        when(clusterManager.readToken(any())).thenReturn("K10token::server:secret");
+        when(clusterManager.adoptNode(any())).thenReturn(true);
+        doAnswer(inv -> {
+            StoredNode node = inv.getArgument(1);
+            node.setContainerName("container-" + node.getName());
+            node.setContainerId("id-" + node.getName());
+            node.setImage(inv.<GkeClusterManager.NodeLaunch>getArgument(2).image());
+            return null;
+        }).when(clusterManager).startNode(any(), any(), any());
 
         operationStore = new InMemoryStorage<>();
         GkeOperationService operationService = new GkeOperationService(operationStore, DEFAULT_PROJECT);
@@ -350,6 +367,173 @@ class GkeServiceTest {
         cluster.setContainerId("old-container");
         cluster.setCaCertificate("b2xkLWNh");
         return cluster;
+    }
+
+
+    // ── Node pools as nodes ──────────────────────────────────────────────────
+
+    private void runRealCluster(String name, Map<String, Object> extra) {
+        when(gkeConfig.mock()).thenReturn(false);
+        Map<String, Object> body = new HashMap<>(extra);
+        body.put("name", name);
+        service.createCluster(PROJECT, "us-central1-a", body);
+        when(clusterManager.isReady(any())).thenReturn(true);
+        doAnswer(inv -> {
+            inv.<StoredCluster>getArgument(0).setCaCertificate("Y2E=");
+            return null;
+        }).when(clusterManager).finalizeCluster(any());
+        service.pollReadiness();
+        assertEquals("RUNNING", service.getCluster(PROJECT, "us-central1-a", name).getStatus());
+    }
+
+    private void markNodesReady(String location, String cluster) {
+        Map<String, GkeClusterManager.NodeState> states = new HashMap<>();
+        for (StoredNodePool pool : service.listNodePools(PROJECT, location, cluster)) {
+            for (StoredNode node : pool.getNodes() == null ? List.<StoredNode>of() : pool.getNodes()) {
+                states.put(node.getName(), new GkeClusterManager.NodeState(true, Map.of(), 0));
+            }
+        }
+        when(clusterManager.nodeStates(any())).thenReturn(states);
+    }
+
+    @Test
+    void aNewClustersNodePoolGetsANodeOnceItsControlPlaneRuns() {
+        runRealCluster("nodes", Map.of("initialNodeCount", 1, "nodeConfig", Map.of("machineType", "e2-standard-2")));
+        StoredNodePool pool = service.getNodePool(PROJECT, "us-central1-a", "nodes", "default-pool");
+        assertEquals("PROVISIONING", pool.getStatus());
+
+        service.pollReadiness();
+
+        pool = service.getNodePool(PROJECT, "us-central1-a", "nodes", "default-pool");
+        assertEquals(1, pool.getNodes().size());
+        StoredNode node = pool.getNodes().get(0);
+        assertTrue(node.getName().matches("^gke-nodes-default-pool-[0-9a-f]{8}-[a-z0-9]{4}$"), node.getName());
+        assertEquals("us-central1-a", node.getZone());
+        assertEquals("PROVISIONING", pool.getStatus());
+        assertEquals(List.of("https://www.googleapis.com/compute/v1/projects/" + PROJECT
+                        + "/zones/us-central1-a/instanceGroupManagers/" + node.getName().substring(0,
+                        node.getName().length() - 5) + "-grp"), pool.getInstanceGroupUrls());
+
+        markNodesReady("us-central1-a", "nodes");
+        service.pollReadiness();
+
+        assertEquals("RUNNING", service.getNodePool(PROJECT, "us-central1-a", "nodes", "default-pool").getStatus());
+        assertEquals("K10token::server:secret", service.getCluster(PROJECT, "us-central1-a", "nodes").getK3sToken());
+        verify(clusterManager, times(1)).startNode(any(), any(), any());
+    }
+
+    @Test
+    void theNodeCapGoesToTheDefaultPoolFirstAndPoolsStillReportTheirSize() {
+        when(gkeConfig.mock()).thenReturn(false);
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "capped", "initialNodeCount", 1));
+        when(clusterManager.isReady(any())).thenReturn(true);
+        doAnswer(inv -> {
+            inv.<StoredCluster>getArgument(0).setCaCertificate("Y2E=");
+            return null;
+        }).when(clusterManager).finalizeCluster(any());
+        service.pollReadiness();
+        service.createNodePool(PROJECT, LOCATION, "capped", Map.of("name", "workers", "initialNodeCount", 2));
+
+        service.pollReadiness();
+
+        StoredNodePool defaultPool = service.getNodePool(PROJECT, LOCATION, "capped", "default-pool");
+        StoredNodePool workers = service.getNodePool(PROJECT, LOCATION, "capped", "workers");
+        assertEquals(Set.of("us-central1-a", "us-central1-b", "us-central1-c"),
+                defaultPool.getNodes().stream().map(StoredNode::getZone).collect(Collectors.toSet()));
+        assertEquals(2, workers.getNodes().size());
+        assertEquals(2, workers.getInitialNodeCount());
+        assertEquals(3, workers.getInstanceGroupUrls().size());
+
+        service.deleteNodePool(PROJECT, LOCATION, "capped", "default-pool");
+        verify(clusterManager, times(3)).removeNode(any());
+        service.pollReadiness();
+        assertEquals(5, service.getNodePool(PROJECT, LOCATION, "capped", "workers").getNodes().size());
+    }
+
+    @Test
+    void resizingAPoolRunsUntilItsNewNodesAreReady() {
+        runRealCluster("resize", Map.of("initialNodeCount", 1));
+        service.pollReadiness();
+        markNodesReady("us-central1-a", "resize");
+        service.pollReadiness();
+
+        StoredOperation op = service.setNodePoolSize(PROJECT, "us-central1-a", "resize", "default-pool",
+                Map.of("nodeCount", 3));
+
+        assertEquals("RUNNING", op.getStatus());
+        assertEquals(OperationType.SET_NODE_POOL_SIZE, op.getOperationType());
+        service.pollReadiness();
+        StoredNodePool pool = service.getNodePool(PROJECT, "us-central1-a", "resize", "default-pool");
+        assertEquals(3, pool.getNodes().size());
+        assertEquals("RECONCILING", pool.getStatus());
+        assertEquals("RUNNING", service.getOperation(PROJECT, "us-central1-a", op.getName()).getStatus());
+
+        markNodesReady("us-central1-a", "resize");
+        service.pollReadiness();
+
+        assertEquals("DONE", service.getOperation(PROJECT, "us-central1-a", op.getName()).getStatus());
+        assertEquals("RUNNING", service.getNodePool(PROJECT, "us-central1-a", "resize", "default-pool").getStatus());
+
+        service.setNodePoolSize(PROJECT, "us-central1-a", "resize", "default-pool", Map.of("nodeCount", 0));
+        service.pollReadiness();
+        assertEquals(List.of(), service.getNodePool(PROJECT, "us-central1-a", "resize", "default-pool").getNodes());
+        assertEquals("RUNNING", service.getNodePool(PROJECT, "us-central1-a", "resize", "default-pool").getStatus());
+        verify(clusterManager, times(3)).removeNode(any());
+    }
+
+    @Test
+    void aNodeVersionOnAnotherMinorReplacesThePoolsNodes() {
+        runRealCluster("node-upgrade", Map.of("initialClusterVersion", "1.36", "initialNodeCount", 1,
+                "nodePools", List.of(Map.of("name", "default-pool", "initialNodeCount", 1, "version", "1.35"))));
+        service.pollReadiness();
+        String before = service.getNodePool(PROJECT, "us-central1-a", "node-upgrade", "default-pool")
+                .getNodes().get(0).getName();
+
+        StoredOperation op = service.updateNodePool(PROJECT, "us-central1-a", "node-upgrade", "default-pool",
+                Map.of("nodeVersion", "1.36"));
+        service.pollReadiness();
+
+        assertEquals("RUNNING", op.getStatus());
+        StoredNode replacement = service.getNodePool(PROJECT, "us-central1-a", "node-upgrade", "default-pool")
+                .getNodes().get(0);
+        assertNotEquals(before, replacement.getName());
+        assertEquals("k3s:36", replacement.getImage());
+        verify(clusterManager).deleteKubernetesNodes(any(), org.mockito.ArgumentMatchers.eq(List.of(before)));
+    }
+
+    @Test
+    void aRestoredClusterAdoptsItsSurvivingNodes() {
+        runRealCluster("survivor-nodes", Map.of("initialNodeCount", 1));
+        service.pollReadiness();
+        markNodesReady("us-central1-a", "survivor-nodes");
+        service.pollReadiness();
+        when(clusterManager.restoreCluster(any())).thenReturn(GkeClusterManager.RestoreOutcome.ADOPTED);
+
+        service.restoreRuntime();
+        assertEquals("RECONCILING",
+                service.getNodePool(PROJECT, "us-central1-a", "survivor-nodes", "default-pool").getStatus());
+        service.pollReadiness();
+        service.pollReadiness();
+
+        verify(clusterManager, times(1)).startNode(any(), any(), any());
+        verify(clusterManager, times(1)).adoptNode(any());
+        assertEquals("RUNNING",
+                service.getNodePool(PROJECT, "us-central1-a", "survivor-nodes", "default-pool").getStatus());
+    }
+
+    @Test
+    void aControlPlaneThatStartedOverGetsNewNodes() {
+        runRealCluster("fresh-start", Map.of("initialNodeCount", 1));
+        service.pollReadiness();
+        when(clusterManager.restoreCluster(any())).thenReturn(GkeClusterManager.RestoreOutcome.RECREATED_FRESH);
+        when(clusterManager.readToken(any())).thenReturn("K10other::server:secret");
+
+        service.restoreRuntime();
+        service.pollReadiness();
+        service.pollReadiness();
+
+        verify(clusterManager, times(2)).startNode(any(), any(), any());
+        verify(clusterManager).removeNode(any());
     }
 
     @Test

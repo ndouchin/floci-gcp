@@ -73,6 +73,14 @@ public class StoredCluster {
     private String reconcileSince;
     /** Operation finished when the cluster leaves {@code RECONCILING}, such as a control plane upgrade. */
     private String pendingOperation;
+    /** The k3s join token agents use, read from the control plane once it is up. */
+    private String k3sToken;
+    private String networkName;
+    private String networkSubnet;
+    private String networkGateway;
+    private String serverIp;
+    /** Whether the node pools' agents must be brought in line with the pools' specs. */
+    private boolean nodesOutOfDate;
 
     public StoredCluster() {
     }
@@ -123,6 +131,12 @@ public class StoredCluster {
         this.createOperation = other.createOperation;
         this.reconcileSince = other.reconcileSince;
         this.pendingOperation = other.pendingOperation;
+        this.k3sToken = other.k3sToken;
+        this.networkName = other.networkName;
+        this.networkSubnet = other.networkSubnet;
+        this.networkGateway = other.networkGateway;
+        this.serverIp = other.serverIp;
+        this.nodesOutOfDate = other.nodesOutOfDate;
     }
 
     public String getName() {
@@ -403,5 +417,53 @@ public class StoredCluster {
 
     public void setPendingOperation(String pendingOperation) {
         this.pendingOperation = pendingOperation;
+    }
+
+    public String getK3sToken() {
+        return k3sToken;
+    }
+
+    public void setK3sToken(String k3sToken) {
+        this.k3sToken = k3sToken;
+    }
+
+    public String getNetworkName() {
+        return networkName;
+    }
+
+    public void setNetworkName(String networkName) {
+        this.networkName = networkName;
+    }
+
+    public String getNetworkSubnet() {
+        return networkSubnet;
+    }
+
+    public void setNetworkSubnet(String networkSubnet) {
+        this.networkSubnet = networkSubnet;
+    }
+
+    public String getNetworkGateway() {
+        return networkGateway;
+    }
+
+    public void setNetworkGateway(String networkGateway) {
+        this.networkGateway = networkGateway;
+    }
+
+    public String getServerIp() {
+        return serverIp;
+    }
+
+    public void setServerIp(String serverIp) {
+        this.serverIp = serverIp;
+    }
+
+    public boolean isNodesOutOfDate() {
+        return nodesOutOfDate;
+    }
+
+    public void setNodesOutOfDate(boolean nodesOutOfDate) {
+        this.nodesOutOfDate = nodesOutOfDate;
     }
 }
