@@ -4,6 +4,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Bind;
@@ -158,6 +159,14 @@ public class ContainerLifecycleManager {
     }
 
     public void stopAndRemove(String containerId, Closeable logStream) {
+        stopAndRemove(containerId, logStream, false);
+    }
+
+    /**
+     * Stops and removes a container; with {@code removeAnonymousVolumes}, also the anonymous volumes
+     * Docker created for its image's {@code VOLUME} paths, which otherwise outlive it. Named volumes stay.
+     */
+    public void stopAndRemove(String containerId, Closeable logStream, boolean removeAnonymousVolumes) {
         LOG.infov("Stopping container {0}", containerId);
 
         closeLogStream(logStream);
@@ -176,7 +185,7 @@ public class ContainerLifecycleManager {
 
         try {
             dockerApi("remove container " + containerId, () -> {
-                dockerClient().removeContainerCmd(containerId).withForce(true).exec();
+                removeContainerCmd(containerId, removeAnonymousVolumes).exec();
                 return null;
             });
             LOG.debugv("Removed container {0}", containerId);
@@ -188,13 +197,18 @@ public class ContainerLifecycleManager {
     }
 
     public void forceRemove(String containerId, Closeable logStream) {
+        forceRemove(containerId, logStream, false);
+    }
+
+    /** Force-removes a container, and with {@code removeAnonymousVolumes} its anonymous volumes. */
+    public void forceRemove(String containerId, Closeable logStream, boolean removeAnonymousVolumes) {
         LOG.infov("Force-removing container {0}", containerId);
 
         closeLogStream(logStream);
 
         try {
             dockerApi("force-remove container " + containerId, () -> {
-                dockerClient().removeContainerCmd(containerId).withForce(true).exec();
+                removeContainerCmd(containerId, removeAnonymousVolumes).exec();
                 return null;
             });
             LOG.debugv("Force-removed container {0}", containerId);
@@ -203,6 +217,11 @@ public class ContainerLifecycleManager {
         } catch (Exception e) {
             LOG.warnv("Error force-removing container {0}: {1}", containerId, e.getMessage());
         }
+    }
+
+    private RemoveContainerCmd removeContainerCmd(String container, boolean removeAnonymousVolumes) {
+        RemoveContainerCmd cmd = dockerClient().removeContainerCmd(container).withForce(true);
+        return removeAnonymousVolumes ? cmd.withRemoveVolumes(true) : cmd;
     }
 
     private void closeLogStream(Closeable logStream) {
@@ -371,9 +390,14 @@ public class ContainerLifecycleManager {
     }
 
     public void removeIfExists(String name) {
+        removeIfExists(name, false);
+    }
+
+    /** Removes a leftover container by name if there is one, and with {@code removeAnonymousVolumes} its anonymous volumes. */
+    public void removeIfExists(String name, boolean removeAnonymousVolumes) {
         try {
             dockerApi("remove stale container " + name, () -> {
-                dockerClient().removeContainerCmd(name).withForce(true).exec();
+                removeContainerCmd(name, removeAnonymousVolumes).exec();
                 return null;
             });
             LOG.infov("Removed stale container {0}", name);

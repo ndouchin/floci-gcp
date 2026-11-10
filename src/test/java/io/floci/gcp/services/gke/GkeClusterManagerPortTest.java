@@ -16,6 +16,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doThrow;
@@ -50,7 +51,7 @@ class GkeClusterManagerPortTest {
 
     @Test
     void failedStartReleasesTheHostPort() {
-        doThrow(new RuntimeException("docker unavailable")).when(lifecycleManager).removeIfExists(anyString());
+        doThrow(new RuntimeException("docker unavailable")).when(lifecycleManager).removeIfExists(anyString(), anyBoolean());
         StoredCluster cluster = cluster();
 
         assertThrows(RuntimeException.class, () -> manager().startCluster(cluster));
@@ -69,7 +70,7 @@ class GkeClusterManagerPortTest {
         assertThrows(RuntimeException.class,
                 () -> manager(mock(ContainerBuilder.class, RETURNS_DEEP_STUBS)).startCluster(cluster));
 
-        verify(lifecycleManager).stopAndRemove("container-1", null);
+        verify(lifecycleManager).stopAndRemove("container-1", null, true);
         verify(lifecycleManager).removeVolume(cluster.getVolumeName());
         assertEquals(null, cluster.getContainerId());
         assertEquals(0, cluster.getHostPort());
@@ -83,7 +84,7 @@ class GkeClusterManagerPortTest {
 
         manager().stopCluster(cluster);
 
-        verify(lifecycleManager).stopAndRemove("container-1", null);
+        verify(lifecycleManager).stopAndRemove("container-1", null, true);
         assertEquals(port, allocate());
     }
 
@@ -104,7 +105,7 @@ class GkeClusterManagerPortTest {
 
         manager().deleteCluster(cluster);
 
-        verify(lifecycleManager).stopAndRemove("container-1", null);
+        verify(lifecycleManager).stopAndRemove("container-1", null, true);
         verify(lifecycleManager).removeVolume("floci-gcp-gke-p1-c1");
         assertEquals(port, allocate());
     }

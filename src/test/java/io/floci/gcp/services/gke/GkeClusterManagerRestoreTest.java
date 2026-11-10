@@ -86,7 +86,7 @@ class GkeClusterManagerRestoreTest {
         GkeClusterManager.RestoreOutcome outcome = manager().restoreCluster(cluster);
 
         assertEquals(GkeClusterManager.RestoreOutcome.RECREATED_ON_VOLUME, outcome);
-        verify(lifecycleManager).stopAndRemove("legacy", null);
+        verify(lifecycleManager).stopAndRemove("legacy", null, true);
         assertEquals("agentless", cluster.getContainerId());
     }
 

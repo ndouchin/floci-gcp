@@ -2,6 +2,7 @@ package io.floci.gcp.services.gke;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.Container;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.core.common.docker.ContainerStorageHelper;
@@ -263,11 +264,23 @@ class GkeDockerIntegrationTest {
 
     @Test
     @Order(7)
-    void deletingTheClusterRemovesItsContainersAndNetwork() {
+    void deletingTheClusterRemovesItsContainersVolumesAndNetwork() {
         StoredCluster before = stored();
+        List<String> volumes = new ArrayList<>();
+        for (Container container : clusterContainers()) {
+            for (InspectContainerResponse.Mount mount : docker.getDockerClient().inspectContainerCmd(container.getId())
+                    .exec().getMounts()) {
+                if (mount.getName() != null) {
+                    volumes.add(mount.getName());
+                }
+            }
+        }
+        assertFalse(volumes.isEmpty());
         given().delete(BASE + "/clusters/" + CLUSTER).then().statusCode(200);
 
         assertTrue(clusterContainers().isEmpty(), "no container of the cluster is left");
+        assertEquals(List.of(), volumes.stream().filter(docker::volumeExists).toList(),
+                "the volumes of the cluster's containers, anonymous ones included, are gone");
         assertTrue(docker.getDockerClient().listNetworksCmd().withNameFilter(before.getNetworkName()).exec().stream()
                 .noneMatch(n -> before.getNetworkName().equals(n.getName())), "the cluster network is gone");
         assertFalse(docker.volumeExists(before.getVolumeName()));

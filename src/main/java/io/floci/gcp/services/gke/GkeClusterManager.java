@@ -185,7 +185,7 @@ public class GkeClusterManager {
         if (survivor.isPresent()) {
             LOG.infov("GKE cluster {0} still runs a control plane that schedules its own workloads; replacing it "
                     + "with one whose node pools run as separate nodes, on the same data volume", cluster.getName());
-            lifecycleManager.stopAndRemove(survivor.get().getId(), null);
+            lifecycleManager.stopAndRemove(survivor.get().getId(), null, true);
         }
         boolean volumeSurvived = lifecycleManager.volumeExists(volumeName(cluster));
         cluster.setContainerId(null);
@@ -355,7 +355,7 @@ public class GkeClusterManager {
      */
     public void replaceControlPlane(StoredCluster cluster) {
         if (cluster.getContainerId() != null) {
-            lifecycleManager.stopAndRemove(cluster.getContainerId(), null);
+            lifecycleManager.stopAndRemove(cluster.getContainerId(), null, true);
             cluster.setContainerId(null);
         }
         String image = imageFor(cluster.getCurrentMasterVersion());
@@ -374,7 +374,7 @@ public class GkeClusterManager {
             return;
         }
         try {
-            lifecycleManager.stopAndRemove(cluster.getContainerId(), null);
+            lifecycleManager.stopAndRemove(cluster.getContainerId(), null, true);
             lifecycleManager.removeVolume(volumeName(cluster));
             removeNetwork(cluster.getNetworkName());
         } catch (RuntimeException e) {
@@ -385,7 +385,7 @@ public class GkeClusterManager {
     }
 
     private void launchContainer(StoredCluster cluster, String image, String containerName, int hostPort) {
-        lifecycleManager.removeIfExists(containerName);
+        lifecycleManager.removeIfExists(containerName, true);
 
         // A named Docker volume (not a host bind mount) for the k3s data dir: bind mounts to a
         // macOS host path make kine's unix socket chmod fail (EINVAL); named volumes live in the
@@ -508,7 +508,7 @@ public class GkeClusterManager {
         node.setContainerName(containerName);
         node.setVolumeName(volumeName);
         node.setImage(launch.image());
-        lifecycleManager.removeIfExists(containerName);
+        lifecycleManager.removeIfExists(containerName, true);
         lifecycleManager.ensureVolume(volumeName);
 
         List<String> args = new ArrayList<>(List.of("agent", "--node-name=" + node.getName()));
@@ -562,7 +562,7 @@ public class GkeClusterManager {
     public void removeNode(StoredNode node) {
         String id = node.getContainerId() != null ? node.getContainerId() : node.getContainerName();
         if (id != null) {
-            lifecycleManager.forceRemove(id, null);
+            lifecycleManager.forceRemove(id, null, true);
         }
         if (node.getVolumeName() != null) {
             lifecycleManager.removeVolume(node.getVolumeName());
@@ -583,7 +583,7 @@ public class GkeClusterManager {
             if (name != null && keep.contains(name)) {
                 continue;
             }
-            lifecycleManager.forceRemove(container.getId(), null);
+            lifecycleManager.forceRemove(container.getId(), null, true);
             if (name != null) {
                 lifecycleManager.removeVolume(name);
             }
@@ -765,7 +765,7 @@ public class GkeClusterManager {
 
     private void removeCluster(StoredCluster cluster) {
         removeNodeContainers(cluster, Set.of());
-        lifecycleManager.stopAndRemove(cluster.getContainerId(), null);
+        lifecycleManager.stopAndRemove(cluster.getContainerId(), null, true);
         lifecycleManager.removeVolume(volumeName(cluster));
         if (cluster.getHostPort() > 0) {
             portAllocator.release(cluster.getHostPort());
