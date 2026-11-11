@@ -395,21 +395,6 @@ public class GkeClusterManager {
         lifecycleManager.ensureVolume(volumeName);
 
         ensureNetwork(cluster);
-        List<String> serverArgs = new ArrayList<>(List.of(
-                "server", "--disable-agent", "--egress-selector-mode=cluster",
-                "--disable=traefik", "--disable=local-storage",
-                "--tls-san=localhost", "--tls-san=" + containerName,
-                "--kube-apiserver-arg=enable-admission-plugins=ExtendedResourceToleration"));
-        if (cluster.getServerIp() != null) {
-            serverArgs.add("--advertise-address=" + cluster.getServerIp());
-        }
-        if (cluster.getClusterIpv4Cidr() != null && cluster.getServicesIpv4Cidr() != null) {
-            serverArgs.add("--cluster-cidr=" + cluster.getClusterIpv4Cidr());
-            serverArgs.add("--service-cidr=" + cluster.getServicesIpv4Cidr());
-            if (cluster.getNodePodCidrSize() > 0) {
-                serverArgs.add("--kube-controller-manager-arg=node-cidr-mask-size-ipv4=" + cluster.getNodePodCidrSize());
-            }
-        }
 
         // Wire a token-authentication webhook so the bearer token from gke-gcloud-auth-plugin
         // (i.e. `gcloud container clusters get-credentials` + kubectl) is reviewed by floci-gcp
@@ -429,11 +414,8 @@ public class GkeClusterManager {
                 .withLogRotation();
         if (webhookLocalFile != null) {
             specBuilder.withHostDockerInternalOnLinux();
-            serverArgs.add("--kube-apiserver-arg=authentication-token-webhook-config-file=" + WEBHOOK_CONFIG_PATH);
-            serverArgs.add("--kube-apiserver-arg=authentication-token-webhook-version=v1");
-            serverArgs.add("--kube-apiserver-arg=authentication-token-webhook-cache-ttl=30s");
         }
-        ContainerSpec spec = specBuilder.withCmd(serverArgs).build();
+        ContainerSpec spec = specBuilder.withCmd(serverArgs(cluster, containerName, webhookLocalFile != null)).build();
 
         // create -> inject webhook kubeconfig -> start, so the file exists before the API server boots.
         String containerId = lifecycleManager.create(spec);
@@ -461,6 +443,56 @@ public class GkeClusterManager {
 
         LOG.infov("k3s container {0} started for cluster {1} on port {2}",
                 containerId, cluster.getName(), String.valueOf(hostPort));
+    }
+
+    /**
+     * The k3s server's arguments: an agentless control plane on the cluster's Pod and Service ranges, advertising its
+     * fixed address. A server whose cluster records the GKE issuer signs ServiceAccount tokens under
+     * {@code https://container.googleapis.com/v1/projects/P/locations/L/clusters/C}, publishes {@code .../jwks} as its
+     * JWKS URI and makes that URL the default token audience; k3s's own issuer and audiences stay accepted, so
+     * tokens issued before keep working.
+     */
+    static List<String> serverArgs(StoredCluster cluster, String containerName, boolean webhook) {
+        List<String> args = new ArrayList<>(List.of(
+                "server", "--disable-agent", "--egress-selector-mode=cluster",
+                "--disable=traefik", "--disable=local-storage",
+                "--tls-san=localhost", "--tls-san=" + containerName,
+                "--kube-apiserver-arg=enable-admission-plugins=ExtendedResourceToleration"));
+        if (cluster.getServerIp() != null) {
+            args.add("--advertise-address=" + cluster.getServerIp());
+        }
+        if (cluster.getClusterIpv4Cidr() != null && cluster.getServicesIpv4Cidr() != null) {
+            args.add("--cluster-cidr=" + cluster.getClusterIpv4Cidr());
+            args.add("--service-cidr=" + cluster.getServicesIpv4Cidr());
+            if (cluster.getNodePodCidrSize() > 0) {
+                args.add("--kube-controller-manager-arg=node-cidr-mask-size-ipv4=" + cluster.getNodePodCidrSize());
+            }
+        }
+        if (cluster.isGkeServiceAccountIssuer()) {
+            String issuer = GkeWorkloadIdentity.issuer(cluster);
+            args.add("--kube-apiserver-arg=service-account-issuer=" + issuer);
+            args.add("--kube-apiserver-arg=service-account-issuer=" + GkeWorkloadIdentity.K3S_ISSUER);
+            args.add("--kube-apiserver-arg=service-account-jwks-uri=" + issuer + "/jwks");
+            args.add("--kube-apiserver-arg=api-audiences=" + issuer + "," + GkeWorkloadIdentity.K3S_ISSUER + ",k3s");
+        }
+        if (webhook) {
+            args.add("--kube-apiserver-arg=authentication-token-webhook-config-file=" + WEBHOOK_CONFIG_PATH);
+            args.add("--kube-apiserver-arg=authentication-token-webhook-version=v1");
+            args.add("--kube-apiserver-arg=authentication-token-webhook-cache-ttl=30s");
+        }
+        return args;
+    }
+
+    /** The JSON Web Key Set the control plane publishes, or null when it cannot be read. */
+    public String readJwks(StoredCluster cluster) {
+        if (cluster.getContainerId() == null) {
+            return null;
+        }
+        ContainerLifecycleManager.ExecResult result = kubectl(cluster, List.of("get", "--raw", "/openid/v1/jwks"));
+        if (result == null || result.exitCode() != 0 || result.stdout() == null || result.stdout().isBlank()) {
+            return null;
+        }
+        return result.stdout().trim();
     }
 
     /** What a node container is started with, besides its name and the cluster it joins. */
@@ -761,6 +793,10 @@ public class GkeClusterManager {
             String caData = extractYamlField(kubeconfigYaml, "certificate-authority-data");
             if (caData != null) {
                 cluster.setCaCertificate(caData.trim());
+            }
+            String jwks = readJwks(cluster);
+            if (jwks != null) {
+                cluster.setJwks(jwks);
             }
             LOG.infov("Finalized GKE cluster {0} with CA data extracted", cluster.getName());
         } catch (Exception e) {

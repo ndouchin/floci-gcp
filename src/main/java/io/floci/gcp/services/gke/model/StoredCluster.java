@@ -88,6 +88,10 @@ public class StoredCluster {
     private String serverIp;
     /** Whether the node pools' agents must be brought in line with the pools' specs. */
     private boolean nodesOutOfDate;
+    /** Whether the control plane issues ServiceAccount tokens under GKE's issuer URL; false for servers of earlier builds. */
+    private boolean gkeServiceAccountIssuer;
+    /** The JSON Web Key Set the control plane publishes at {@code /openid/v1/jwks}, read once it is ready. */
+    private String jwks;
 
     public StoredCluster() {
     }
@@ -148,6 +152,8 @@ public class StoredCluster {
         this.nodesOutOfDate = other.nodesOutOfDate;
         this.id = other.id;
         this.workloadPool = other.workloadPool;
+        this.gkeServiceAccountIssuer = other.gkeServiceAccountIssuer;
+        this.jwks = other.jwks;
     }
 
     public String getName() {
@@ -508,5 +514,21 @@ public class StoredCluster {
 
     public void setWorkloadPool(String workloadPool) {
         this.workloadPool = workloadPool;
+    }
+
+    public boolean isGkeServiceAccountIssuer() {
+        return gkeServiceAccountIssuer;
+    }
+
+    public void setGkeServiceAccountIssuer(boolean gkeServiceAccountIssuer) {
+        this.gkeServiceAccountIssuer = gkeServiceAccountIssuer;
+    }
+
+    public String getJwks() {
+        return jwks;
+    }
+
+    public void setJwks(String jwks) {
+        this.jwks = jwks;
     }
 }

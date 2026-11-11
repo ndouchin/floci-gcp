@@ -258,6 +258,16 @@ public class KubernetesController {
     }
 
     @GET
+    @Path("/clusters/{clusterId}/.well-known/openid-configuration")
+    public Response getOpenIdConfiguration(
+            @PathParam("project") String project,
+            @PathParam("location") String location,
+            @PathParam("clusterId") String clusterId) {
+
+        return Response.ok(gkeService.getOpenIdConfiguration(project, location, clusterId)).build();
+    }
+
+    @GET
     @Path("/clusters/{clusterId: [^:/]+}:checkAutopilotCompatibility")
     public Response checkAutopilotCompatibility(
             @PathParam("project") String project,

@@ -1241,6 +1241,85 @@ class GkeServiceTest {
     }
 
     @Test
+    void newClustersIssueServiceAccountTokensUnderTheGkeIssuer() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "issuer"));
+        assertTrue(service.getCluster(PROJECT, LOCATION, "issuer").isGkeServiceAccountIssuer());
+    }
+
+    @Test
+    void enablingWorkloadIdentityOnAClusterStoredByAnEarlierBuildMovesItsServerToTheGkeIssuer() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "round-one"));
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "current"));
+        clusterStore.get("projects/" + PROJECT + "/locations/" + LOCATION + "/clusters/round-one").orElseThrow()
+                .setGkeServiceAccountIssuer(false);
+        when(gkeConfig.mock()).thenReturn(false);
+        Map<String, Object> enable = Map.of("desiredWorkloadIdentityConfig",
+                Map.of("workloadPool", PROJECT + ".svc.id.goog"));
+
+        StoredOperation current = service.updateCluster(PROJECT, LOCATION, "current", enable);
+        assertEquals("DONE", current.getStatus());
+        verify(clusterManager, never()).replaceControlPlane(any());
+
+        StoredOperation op = service.updateCluster(PROJECT, LOCATION, "round-one", enable);
+
+        assertEquals("RUNNING", op.getStatus());
+        assertEquals(OperationType.UPDATE_CLUSTER, op.getOperationType());
+        verify(clusterManager).replaceControlPlane(org.mockito.ArgumentMatchers.argThat(
+                StoredCluster::isGkeServiceAccountIssuer));
+        StoredCluster moving = service.getCluster(PROJECT, LOCATION, "round-one");
+        assertEquals("RECONCILING", moving.getStatus());
+        assertEquals(PROJECT + ".svc.id.goog", moving.getWorkloadPool());
+        assertTrue(moving.isGkeServiceAccountIssuer());
+    }
+
+    @Test
+    void theJsonWebKeysAreTheOnesTheClustersApiServerPublishes() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "keys"));
+        assertEquals(Map.of("keys", List.of()), service.getJsonWebKeys(PROJECT, LOCATION, "keys"));
+
+        clusterStore.get("projects/" + PROJECT + "/locations/" + LOCATION + "/clusters/keys").orElseThrow()
+                .setJwks("{\"keys\":[{\"use\":\"sig\",\"kty\":\"RSA\",\"kid\":\"k1\",\"alg\":\"RS256\","
+                        + "\"n\":\"AQAB-n\",\"e\":\"AQAB\",\"x5c\":[\"ignored\"]}]}");
+
+        assertEquals(Map.of("keys", List.of(Map.of("kty", "RSA", "alg", "RS256", "use", "sig", "kid", "k1",
+                "n", "AQAB-n", "e", "AQAB"))), service.getJsonWebKeys(PROJECT, LOCATION, "keys"));
+    }
+
+    @Test
+    void theJsonWebKeysAreReadOnceTheControlPlaneIsReady() {
+        when(gkeConfig.mock()).thenReturn(false);
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "readback"));
+        when(clusterManager.isReady(any())).thenReturn(true);
+        doAnswer(inv -> {
+            StoredCluster probe = inv.getArgument(0);
+            probe.setCaCertificate("Y2E=");
+            probe.setJwks("{\"keys\":[{\"kty\":\"RSA\",\"kid\":\"k2\",\"n\":\"n\",\"e\":\"AQAB\"}]}");
+            return null;
+        }).when(clusterManager).finalizeCluster(any());
+
+        service.pollReadiness();
+
+        assertEquals("RUNNING", service.getCluster(PROJECT, LOCATION, "readback").getStatus());
+        assertEquals(Map.of("keys", List.of(Map.of("kty", "RSA", "kid", "k2", "n", "n", "e", "AQAB"))),
+                service.getJsonWebKeys(PROJECT, LOCATION, "readback"));
+    }
+
+    @Test
+    void theOpenIdConfigurationNamesTheClustersIssuerAndKeys() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "oidc"));
+        String issuer = "https://container.googleapis.com/v1/projects/" + PROJECT + "/locations/" + LOCATION
+                + "/clusters/oidc";
+
+        Map<String, Object> document = service.getOpenIdConfiguration(PROJECT, LOCATION, "oidc");
+
+        assertEquals(issuer, document.get("issuer"));
+        assertEquals(issuer + "/jwks", document.get("jwks_uri"));
+        assertEquals(List.of("id_token"), document.get("response_types_supported"));
+        assertEquals(List.of("public"), document.get("subject_types_supported"));
+        assertEquals(List.of("RS256"), document.get("id_token_signing_alg_values_supported"));
+    }
+
+    @Test
     void aReadinessPassWhileTheControlPlaneIsReplacedDoesNotFailTheUpgrade() {
         service.createCluster(PROJECT, LOCATION, Map.of("name", "racing-upgrade"));
         when(gkeConfig.mock()).thenReturn(false);

@@ -1,6 +1,9 @@
 package io.floci.gcp.services.gke;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.LocationCatalog;
@@ -52,6 +55,7 @@ public class GkeService {
     private static final Logger LOG = Logger.getLogger(GkeService.class);
 
     private static final String DEFAULT_NODE_POOL_NAME = "default-pool";
+    private static final ObjectMapper JSON = new ObjectMapper();
     private static final Pattern VALID_CLUSTER_NAME =
             Pattern.compile("^[a-z](?:[a-z0-9-]{0,38}[a-z0-9])?$");
     /** {@code 1.X} / {@code 1.X.Y}: the two prefix aliases a version field documents. */
@@ -415,6 +419,7 @@ public class GkeService {
         cluster.setEtag(newFingerprint());
         cluster.setExtraConfig(extraFields(clusterMap, TYPED_CLUSTER_FIELDS));
         cluster.setWorkloadPool(workloadPool);
+        cluster.setGkeServiceAccountIssuer(true);
         if (!ranges.routesBased()) {
             putExtraConfig(cluster, "ipAllocationPolicy", vpcNativePolicy(clusterMap.get("ipAllocationPolicy"), ranges));
         }
@@ -644,6 +649,11 @@ public class GkeService {
                 checkMasterUpgrade(cluster.getCurrentMasterVersion(), masterVersion);
                 requireReplaceableControlPlane(cluster, masterVersion);
             }
+            boolean moveToGkeIssuer = desiredWorkloadPool != null && !mock() && !cluster.isGkeServiceAccountIssuer();
+            if (moveToGkeIssuer && !"RUNNING".equals(cluster.getStatus())) {
+                throw GcpException.failedPrecondition("Cluster " + cluster.getName() + " is " + cluster.getStatus()
+                        + "; Workload Identity can only be enabled while it is RUNNING.");
+            }
             if (nodeVersion != null) {
                 // The pool carries its own `version`, and GetNodePool/ListNodePools read it from
                 // the pool store, so moving only the cluster aggregate would report the new
@@ -695,6 +705,13 @@ public class GkeService {
             stripped.remove("monitoringService");
             stripped.remove("workloadIdentityConfig");
             mergeExtraConfig(cluster, stripped);
+            if (moveToGkeIssuer) {
+                // A server started by an earlier build signs tokens under k3s's issuer, which STS cannot federate.
+                cluster.setGkeServiceAccountIssuer(true);
+                if (upgrade == null) {
+                    upgrade = recreateControlPlane(project, location, clusterId, cluster, OperationType.UPDATE_CLUSTER);
+                }
+            }
         }
         touch(cluster);
         clusterStore.put(clusterKey(project, location, clusterId), cluster);
@@ -758,6 +775,13 @@ public class GkeService {
         if (!replace) {
             return null;
         }
+        return recreateControlPlane(project, location, clusterId, cluster, type);
+    }
+
+    /** Recreates the control plane container on its volume with the cluster's current settings, as
+     * {@link #moveControlPlane} does for a new image. */
+    private StoredOperation recreateControlPlane(String project, String location, String clusterId,
+                                                 StoredCluster cluster, OperationType type) {
         touch(cluster);
         StoredOperation op = operationService.createRunningOperation(project, location, clusterId, type);
         String key = clusterKey(project, location, clusterId);
@@ -940,14 +964,49 @@ public class GkeService {
         return config;
     }
 
-    /** {@code GetJSONWebKeys} — floci-gcp does not issue real, independently-verifiable
-     * workload-identity tokens (any bearer token is accepted, per the emulator's auth-bypass
-     * model), so there is no real signing key to expose. Returns an empty key set rather than a
-     * fabricated key, since a fabricated key would misleadingly imply real token verification is
-     * possible against it. */
+    /** {@code GetJSONWebKeys}: the keys the cluster's API server signs ServiceAccount tokens with, as it publishes
+     * them at {@code /openid/v1/jwks}, in the {@code Jwk} fields of cluster_service.proto. Empty for a mock cluster
+     * and for one whose API server has not been ready yet. */
     public Map<String, Object> getJsonWebKeys(String project, String location, String clusterId) {
-        requireCluster(project, location, clusterId);
-        return Map.of("keys", List.of());
+        StoredCluster cluster = requireCluster(project, location, clusterId);
+        return Map.of("keys", jsonWebKeys(cluster.getJwks()));
+    }
+
+    private static final List<String> JWK_FIELDS = List.of("kty", "alg", "use", "kid", "n", "e", "x", "y", "crv");
+
+    static List<Map<String, Object>> jsonWebKeys(String jwks) {
+        if (jwks == null || jwks.isBlank()) {
+            return List.of();
+        }
+        List<Map<String, Object>> keys = new ArrayList<>();
+        try {
+            for (JsonNode key : JSON.readTree(jwks).path("keys")) {
+                Map<String, Object> jwk = new LinkedHashMap<>();
+                for (String field : JWK_FIELDS) {
+                    if (key.hasNonNull(field)) {
+                        jwk.put(field, key.get(field).asText());
+                    }
+                }
+                keys.add(jwk);
+            }
+        } catch (JsonProcessingException e) {
+            LOG.warnv("Ignoring an unreadable JSON Web Key Set: {0}", e.getMessage());
+            return List.of();
+        }
+        return keys;
+    }
+
+    /** {@code GetOpenIDConfig}: the discovery document of the cluster's issuer, which its API server also serves. */
+    public Map<String, Object> getOpenIdConfiguration(String project, String location, String clusterId) {
+        StoredCluster cluster = requireCluster(project, location, clusterId);
+        String issuer = GkeWorkloadIdentity.issuer(cluster);
+        Map<String, Object> document = new LinkedHashMap<>();
+        document.put("issuer", issuer);
+        document.put("jwks_uri", issuer + "/jwks");
+        document.put("response_types_supported", List.of("id_token"));
+        document.put("subject_types_supported", List.of("public"));
+        document.put("id_token_signing_alg_values_supported", List.of("RS256"));
+        return document;
     }
 
     /** {@code ListUsableSubnetworks} — floci-gcp does not emulate Compute Engine/VPC, so there is
@@ -1875,15 +1934,15 @@ public class GkeService {
         if (clusterManager.isReady(probe)) {
             clusterManager.finalizeCluster(probe);
             if (probe.getCaCertificate() != null && !probe.getCaCertificate().isBlank()) {
-                settle(seen, probe.getCaCertificate(), null);
+                settle(seen, probe.getCaCertificate(), probe.getJwks(), null);
                 return;
             }
         } else if (clusterManager.isControlPlaneStopped(probe)) {
-            settle(seen, null, "The control plane of cluster " + seen.getName() + " stopped before it became ready");
+            settle(seen, null, null, "The control plane of cluster " + seen.getName() + " stopped before it became ready");
             return;
         }
         if (startupExpired(seen)) {
-            settle(seen, null, "The control plane of cluster " + seen.getName() + " did not become ready within "
+            settle(seen, null, null, "The control plane of cluster " + seen.getName() + " did not become ready within "
                     + STARTUP_TIMEOUT.toMinutes() + " minutes");
         }
     }
@@ -1891,7 +1950,7 @@ public class GkeService {
     /** Moves a still-provisioning or reconciling cluster to {@code RUNNING} (with its CA) or, given a
      * failure, to {@code ERROR}, and finishes the create operation recorded on it. A pass whose cluster
      * was deleted, recreated or settled meanwhile writes nothing. */
-    private void settle(StoredCluster seen, String caCertificate, String failure) {
+    private void settle(StoredCluster seen, String caCertificate, String jwks, String failure) {
         String key = clusterKey(seen.getProject(), seen.getLocation(), seen.getName());
         synchronized (lifecycleLock) {
             Optional<StoredCluster> current = clusterStore.get(key);
@@ -1904,6 +1963,9 @@ public class GkeService {
             StoredCluster cluster = current.get();
             if (failure == null) {
                 cluster.setCaCertificate(caCertificate);
+                if (jwks != null) {
+                    cluster.setJwks(jwks);
+                }
                 cluster.setStatus("RUNNING");
                 cluster.setStatusMessage(null);
             } else {

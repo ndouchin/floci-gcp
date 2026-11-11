@@ -20,12 +20,19 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.api.condition.EnabledIf;
 
+import java.math.BigInteger;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.KeyFactory;
+import java.security.PublicKey;
+import java.security.Signature;
+import java.security.spec.RSAPublicKeySpec;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -103,7 +110,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(1)
+    @Order(10)
     void createsAnAgentlessControlPlaneOnThePinnedK3sRelease() {
         service = gkeService;
         docker = lifecycleManager;
@@ -129,7 +136,36 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(2)
+    @Order(15)
+    void signsServiceAccountTokensUnderTheGkeIssuerWithTheKeysGetJsonWebKeysReturns() throws Exception {
+        String issuer = "https://container.googleapis.com/v1/projects/" + PROJECT + "/locations/" + ZONE
+                + "/clusters/" + CLUSTER;
+        JsonNode discovery = JSON.readTree(kubectl("get", "--raw", "/.well-known/openid-configuration"));
+        assertEquals(issuer, discovery.path("issuer").asText());
+        assertEquals(issuer + "/jwks", discovery.path("jwks_uri").asText());
+
+        await("default ServiceAccount", () -> !kubectlOrEmpty("-n", "default", "get", "serviceaccount", "default",
+                "-o", "name").isEmpty());
+        String token = kubectl("create", "token", "default", "-n", "default", "--audience", PROJECT + ".svc.id.goog")
+                .trim();
+        String[] parts = token.split("\\.");
+        JsonNode header = JSON.readTree(Base64.getUrlDecoder().decode(parts[0]));
+        assertEquals(issuer, JSON.readTree(Base64.getUrlDecoder().decode(parts[1])).path("iss").asText());
+
+        List<Map<String, String>> keys = given().get(BASE + "/clusters/" + CLUSTER + "/jwks").path("keys");
+        Map<String, String> key = keys.stream().filter(k -> header.path("kid").asText().equals(k.get("kid")))
+                .findFirst().orElseThrow(() -> new AssertionError("no key " + header + " in " + keys));
+        PublicKey publicKey = KeyFactory.getInstance("RSA").generatePublic(new RSAPublicKeySpec(
+                new BigInteger(1, Base64.getUrlDecoder().decode(key.get("n"))),
+                new BigInteger(1, Base64.getUrlDecoder().decode(key.get("e")))));
+        Signature signature = Signature.getInstance("SHA256withRSA");
+        signature.initVerify(publicKey);
+        signature.update((parts[0] + "." + parts[1]).getBytes(StandardCharsets.US_ASCII));
+        assertTrue(signature.verify(Base64.getUrlDecoder().decode(parts[2])), "the token verifies against GetJSONWebKeys");
+    }
+
+    @Test
+    @Order(20)
     void runsNodePoolsAsGkeNamedNodesSizedFromTheirMachineType() throws Exception {
         awaitPool("default-pool", "RUNNING");
         JsonNode nodes = JSON.readTree(kubectl("get", "nodes", "-o", "json")).path("items");
@@ -159,7 +195,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(3)
+    @Order(30)
     void appliesThePodAndServiceRangesAndKeepsMetricsServer() throws Exception {
         Response cluster = given().get(BASE + "/clusters/" + CLUSTER);
         assertEquals("10.60.0.0/16", cluster.path("clusterIpv4Cidr"));
@@ -178,7 +214,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(4)
+    @Order(40)
     void authenticatesBearerTokensThroughTheClustersTokenWebhook() {
         String token = tokens.mintImpersonatedToken("deployer@" + PROJECT + ".iam.gserviceaccount.com",
                 Instant.now().plusSeconds(600)).getTokenValue();
@@ -195,7 +231,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(5)
+    @Order(50)
     void providesGkeStorageClassesAndBindsAVolumeOnTheDefaultOne() throws Exception {
         Map<String, JsonNode> classes = new HashMap<>();
         for (JsonNode sc : JSON.readTree(kubectl("get", "storageclass", "-o", "json")).path("items")) {
@@ -238,7 +274,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(60)
     void resizesPoolsAndAppliesTheirTaints() throws Exception {
         Response resize = given().urlEncodingEnabled(false).contentType("application/json").body("{\"nodeCount\": 2}")
                 .post(BASE + "/clusters/" + CLUSTER + "/nodePools/default-pool:setSize");
@@ -266,7 +302,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(70)
     void gpuPoolsAdvertiseTheirGpusAndCarryGkesGpuTaint() throws Exception {
         Response gpu = given().contentType("application/json").body("""
                 {"nodePool": {"name": "gpu", "initialNodeCount": 1, "config": {
@@ -309,7 +345,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(80)
     void restoresAStoppedControlPlane() {
         StoredCluster before = stored();
         docker.getDockerClient().stopContainerCmd(before.getContainerId()).withTimeout(5).exec();
@@ -326,7 +362,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(90)
     void upgradesTheControlPlaneOntoTheNextMinorsImage() {
         Response upgrade = given().urlEncodingEnabled(false).contentType("application/json")
                 .body("{\"masterVersion\": \"1.36\"}")
@@ -351,7 +387,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(100)
     void deletingTheClusterRemovesItsContainersVolumesAndNetwork() {
         StoredCluster before = stored();
         List<String> volumes = new ArrayList<>();

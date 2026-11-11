@@ -50,4 +50,22 @@ class GkeWorkloadIdentityRestIntegrationTest {
                 .post(V1 + "/clusters").then().statusCode(400)
                 .body("error.status", equalTo("INVALID_ARGUMENT"));
     }
+
+    @Test
+    void theOpenIdConfigurationIsServedUnderTheClusterInPathAndHostMode() {
+        given().contentType("application/json").body("{\"cluster\": {\"name\": \"oidc\"}}")
+                .post(V1 + "/clusters").then().statusCode(200);
+        String issuer = "https://container.googleapis.com/v1/projects/" + PROJECT + "/locations/" + LOCATION
+                + "/clusters/oidc";
+
+        given().get(V1 + "/clusters/oidc/.well-known/openid-configuration").then().statusCode(200)
+                .body("issuer", equalTo(issuer))
+                .body("jwks_uri", equalTo(issuer + "/jwks"));
+        given().header("Host", "container.localhost")
+                .get("/v1beta1/projects/" + PROJECT + "/locations/" + LOCATION + "/clusters/oidc/.well-known/openid-configuration")
+                .then().statusCode(200)
+                .body("issuer", equalTo(issuer));
+        given().get(V1 + "/clusters/oidc/jwks").then().statusCode(200).body("keys.size()", equalTo(0));
+        given().get(V1 + "/clusters/missing/.well-known/openid-configuration").then().statusCode(404);
+    }
 }
