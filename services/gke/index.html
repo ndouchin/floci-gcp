@@ -1,0 +1,3485 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Free, open-source local GCP emulator">
+      
+      
+      
+        <link rel="canonical" href="https://floci.io/floci-gcp/services/gke/">
+      
+      
+        <link rel="prev" href="../managed-kafka/">
+      
+      
+        <link rel="next" href="../cloud-sql-postgres/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/floci.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.1">
+    
+    
+      
+        <title>GKE (Kubernetes Engine) - floci-gcp</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  
+  <script defer src="https://cloud.umami.is/script.js" data-website-id="b2ab8ccd-4619-4b94-bfa6-e8870961d6eb"></script>
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#gke-kubernetes-engine" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="floci-gcp" class="md-header__button md-logo" aria-label="floci-gcp" data-md-component="logo">
+      
+  <img src="../../assets/floci-header.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            floci-gcp
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              GKE (Kubernetes Engine)
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/floci-io/floci-gcp" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    floci-io/floci-gcp
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../getting-started/quick-start/" class="md-tabs__link">
+          
+  
+  
+  Getting Started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../configuration/environment-variables/" class="md-tabs__link">
+          
+  
+  
+  Configuration
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Services
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../contributing/" class="md-tabs__link">
+          
+  
+  
+  Contributing
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="floci-gcp" class="md-nav__button md-logo" aria-label="floci-gcp" data-md-component="logo">
+      
+  <img src="../../assets/floci-header.svg" alt="logo">
+
+    </a>
+    floci-gcp
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/floci-io/floci-gcp" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    floci-io/floci-gcp
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quick-start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/gcp-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GCP CLI & SDK Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Configuration
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/environment-variables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Environment Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/docker-compose/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker Compose
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/multi-project/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Project Isolation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/storage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Storage Modes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_5" id="__nav_3_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Advanced
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Advanced
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/advanced/application-yml/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    application.yml Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/advanced/tls/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS / HTTPS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Services
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../compute/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Compute Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../locations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Locations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../gcs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Storage (GCS)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pubsub/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pub/Sub
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../firestore/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firestore
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../datastore/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Datastore
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../secret-manager/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secret Manager
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../logging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Logging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud KMS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iam/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../resource-manager/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Resource Manager
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iam-credentials/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM Credentials
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Token Service (STS)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../managed-kafka/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Managed Kafka
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GKE (Kubernetes Engine)
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GKE (Kubernetes Engine)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#routing-how-clients-reach-gke" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Routing: how clients reach GKE
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Routing: how clients reach GKE">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#api-versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        API versions
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#quick-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quick Start
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Versions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#kubectl-access" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        kubectl Access
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#restarts-and-persistence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Restarts and persistence
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#mock-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Mock Mode
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#node-pools" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Node Pools
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Node Pools">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#nodes-real-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Nodes (real mode)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#node-names-provider-ids-and-instance-groups" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Node names, provider IDs and instance groups
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#node-labels-and-taints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Node labels and taints
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#node-size" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Node size
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#gpus" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GPUs
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#storage-classes-real-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Storage classes (real mode)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#networking" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Networking
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#workload-identity-federation-for-gke" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Workload Identity Federation for GKE
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Workload Identity Federation for GKE">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#cluster-and-node-pool-fields" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cluster and node pool fields
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#issuer-and-keys" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Issuer and keys
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-metadata-server-on-each-node" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The metadata server on each node
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#granting-access" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Granting access
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#loadbalancer-services" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LoadBalancer Services
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#supported-operations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported Operations
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#limitations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Limitations
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloud-sql-postgres/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud SQL (PostgreSQL, MySQL)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloud-run/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Run
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloud-functions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Functions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloud-tasks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Tasks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Scheduler
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloud-monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Monitoring
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../eventarc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Eventarc
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../service-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service Usage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cloud-billing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cloud Billing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../firebase-auth/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firebase Auth
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../bigquery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    BigQuery
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Contributing
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../iam-enforcement/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IAM Enforcement Adapters
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#routing-how-clients-reach-gke" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Routing: how clients reach GKE
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Routing: how clients reach GKE">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#api-versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        API versions
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#quick-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quick Start
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Versions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#kubectl-access" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        kubectl Access
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#restarts-and-persistence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Restarts and persistence
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#mock-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Mock Mode
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#node-pools" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Node Pools
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Node Pools">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#nodes-real-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Nodes (real mode)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#node-names-provider-ids-and-instance-groups" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Node names, provider IDs and instance groups
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#node-labels-and-taints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Node labels and taints
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#node-size" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Node size
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#gpus" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GPUs
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#storage-classes-real-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Storage classes (real mode)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#networking" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Networking
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#workload-identity-federation-for-gke" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Workload Identity Federation for GKE
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Workload Identity Federation for GKE">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#cluster-and-node-pool-fields" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cluster and node pool fields
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#issuer-and-keys" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Issuer and keys
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-metadata-server-on-each-node" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The metadata server on each node
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#granting-access" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Granting access
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#loadbalancer-services" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LoadBalancer Services
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#supported-operations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported Operations
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#limitations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Limitations
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="gke-kubernetes-engine">GKE (Kubernetes Engine)</h1>
+<p>floci-gcp emulates the Google Kubernetes Engine control plane (<code>container.googleapis.com</code>,
+ClusterManager v1) over REST JSON. Clusters are backed by real <a href="https://k3s.io/">k3s</a>
+containers (<code>rancher/k3s</code>) started through the host Docker daemon: an agentless control plane
+on the k3s release of the cluster's Kubernetes version, and one k3s agent per node pool node.
+A lightweight mock mode keeps everything metadata-only.</p>
+<h2 id="configuration">Configuration</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_GKE_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable/disable GKE</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_GKE_MOCK</code></td>
+<td><code>false</code></td>
+<td>Mock mode: clusters return <code>RUNNING</code> immediately without starting a k3s container</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_GKE_IMAGE_REPOSITORY</code></td>
+<td><code>rancher/k3s</code></td>
+<td>Repository of the k3s images pinned per Kubernetes minor version (see <a href="#versions">Versions</a>)</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_GKE_DEFAULT_IMAGE</code></td>
+<td><em>(none)</em></td>
+<td>Forces one image on every cluster, whatever its version</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_GKE_API_SERVER_BASE_PORT</code></td>
+<td><code>6550</code></td>
+<td>Start of the host port range for k3s API servers</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_GKE_API_SERVER_MAX_PORT</code></td>
+<td><code>6599</code></td>
+<td>End of the host port range</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_GKE_ENDPOINT_MODE</code></td>
+<td><code>host</code></td>
+<td>How the cluster endpoint is advertised to <code>kubectl</code> (<code>host</code> for a reachable <code>host:port</code>)</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_GKE_KEEP_RUNNING_ON_SHUTDOWN</code></td>
+<td><code>false</code></td>
+<td>Leave spawned k3s containers running after floci-gcp shuts down</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_GKE_MAX_NODES_PER_CLUSTER</code></td>
+<td><code>5</code></td>
+<td>Node containers one cluster runs at most (see <a href="#nodes-real-mode">Nodes</a>)</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_GKE_DOCKER_NETWORK</code></td>
+<td><em>(none)</em></td>
+<td>Overrides <code>FLOCI_GCP_SERVICES_DOCKER_NETWORK</code> for GKE/k3s sidecars only</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_GKE_METADATA_SERVER_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Runs the GKE metadata server on real clusters (see <a href="#workload-identity-federation-for-gke">Workload Identity</a>)</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_GKE_METADATA_SERVER_RELAY_IMAGE</code></td>
+<td><code>nginx:1.30.6-alpine</code></td>
+<td>Image of the per-node metadata relay (nginx's stable line, pinned)</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_GKE_LOAD_BALANCER_MODE</code></td>
+<td><code>emulated</code></td>
+<td>Who serves Services of type LoadBalancer on new clusters: <code>emulated</code>, <code>servicelb</code> (k3s's own) or <code>off</code> (see <a href="#loadbalancer-services">LoadBalancer Services</a>)</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_GKE_LOAD_BALANCER_PROVISIONING_DELAY</code></td>
+<td><code>0s</code></td>
+<td>How long an emulated load balancer stays pending before it gets its address</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_GKE_LOAD_BALANCER_PUBLIC_CIDR</code></td>
+<td><code>203.0.113.0/24</code></td>
+<td>Range of external load balancer addresses (a TEST-NET range, never routed)</td>
+</tr>
+<tr>
+<td><code>FLOCI_GCP_SERVICES_GKE_LOAD_BALANCER_HOST_PORTS</code></td>
+<td><code>dynamic</code></td>
+<td>Host ports of load balancer appliances: <code>dynamic</code>, <code>same-as-service</code> or <code>none</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="routing-how-clients-reach-gke">Routing: how clients reach GKE</h2>
+<p>On real GCP, <code>container.googleapis.com</code> and other APIs share the canonical
+<code>/v1/projects/.../clusters</code> path and are told apart only by hostname. floci-gcp serves
+everything on one port, where that path also belongs to Managed Kafka, so GKE mounts under a
+<code>/container</code> prefix and a routing filter maps clients onto it two ways:</p>
+<ul>
+<li><strong>Host mode (SDKs, Terraform/OpenTofu):</strong> point the client endpoint host at <code>container.*</code> (e.g.
+  <code>http://container.localhost:4588</code>). The first DNS label <code>container</code> triggers a rewrite of
+  <code>/v1/...</code> to <code>/container/v1/...</code>. <code>container.localhost</code> resolves to loopback out of the box on
+  most systems (systemd-resolved's synthetic <code>*.localhost</code> wildcard on Linux; no <code>/etc/hosts</code> edit
+  needed on macOS either).</li>
+<li><strong>Path mode (gcloud / direct):</strong> call the <code>/container/v1/...</code> prefix directly, or set a
+  custom endpoint base of <code>&lt;endpoint&gt;/container/v1/</code>.</li>
+</ul>
+<h3 id="api-versions">API versions</h3>
+<p>GKE is served under both <code>v1</code> and <code>v1beta1</code>, which declare the same HTTP bindings, so either
+mode above works with either version (<code>/v1beta1/...</code> on a <code>container.*</code> host, or
+<code>/container/v1beta1/...</code>). The <code>google-beta</code> Terraform provider and Pulumi gcp (bridged from it)
+always call <code>v1beta1</code>; point them at the same host mode endpoint
+(<code>container_custom_endpoint = "http://container.localhost:4588/"</code>).</p>
+<ul>
+<li>Both versions share the same handlers and the same store: a cluster created on one is visible
+  on the other.</li>
+<li>Fields that only <code>v1beta1</code> defines (for example <code>workloadAltsConfig</code>, <code>protectConfig</code>,
+  <code>nodeConfig.hostMaintenancePolicy</code>) are accepted and ignored, like any field the emulator does
+  not model. Set to a non-default value, they are named in a DEBUG log line.</li>
+<li><code>selfLink</code> always uses <code>/container/v1/</code>.</li>
+<li>The v1beta1-only <code>ListLocations</code> method returns <code>501 UNIMPLEMENTED</code>.</li>
+<li>Any other API version (<code>/v2/...</code> on a <code>container.*</code> host, or <code>/container/v2/...</code>) returns a
+  JSON <code>404 NOT_FOUND</code> naming the path.</li>
+</ul>
+<div class="admonition warning">
+<p class="admonition-title">Terraform/OpenTofu must use host mode, not path mode</p>
+<p>The <code>hashicorp/google</code> provider's GKE client resolves its base URL through a
+<code>RemoveBasePathVersion</code> helper that strips the <em>last path segment</em> of any custom endpoint,
+on the assumption it is a stray API version suffix (<code>.../v1/</code>). Given a path-prefixed
+endpoint like <code>&lt;endpoint&gt;/container/</code>, it incorrectly strips <code>container</code> too, so
+<code>container_custom_endpoint = "&lt;endpoint&gt;/container/"</code> silently resolves to bare <code>&lt;endpoint&gt;/</code>
+and every GKE call 404s or is routed to whatever other service happens to own that raw
+<code>/v1/projects/.../locations/.../clusters</code> path (Managed Kafka, in this codebase). Set
+<code>container_custom_endpoint = "http://container.localhost:4588/"</code> (host mode) instead. Not yet
+wired into <code>compatibility-tests/compat-terraform</code>'s CI suite — that suite's floci-gcp
+container is reached as <code>floci-gcp:4588</code> on the shared Docker network, so a <code>container.*</code>
+host override needs a network alias (or <code>/etc/hosts</code> entry) for <code>container.floci-gcp</code> in
+<code>compatibility.yml</code>, not just the <code>*.localhost</code> wildcard resolution local dev gets for free.
+Verified manually against <code>./mvnw quarkus:dev</code> instead; see the PR description for the exact
+commands.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">SDK transport</p>
+<p>The Cloud Client libraries default to gRPC, which the REST-only emulator does not serve
+for GKE. Build the client with the HttpJson transport
+(<code>ClusterManagerSettings.newHttpJsonBuilder()</code>) and a <code>container.*</code> endpoint host.</p>
+</div>
+<h2 id="quick-start">Quick Start</h2>
+<div class="tabbed-set tabbed-alternate" data-tabs="1:2"><input checked="checked" id="__tabbed_1_1" name="__tabbed_1" type="radio" /><input id="__tabbed_1_2" name="__tabbed_1" type="radio" /><div class="tabbed-labels"><label for="__tabbed_1_1">REST API</label><label for="__tabbed_1_2">gcloud</label></div>
+<div class="tabbed-content">
+<div class="tabbed-block">
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1"># Create a cluster (path mode)</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span><span class="s2">"http://localhost:4588/container/v1/projects/floci-local/locations/us-central1/clusters"</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">  </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">  </span>-d<span class="w"> </span><span class="s1">'{"cluster":{"name":"my-cluster"}}'</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="c1"># Get / list clusters</span>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>curl<span class="w"> </span><span class="s2">"http://localhost:4588/container/v1/projects/floci-local/locations/us-central1/clusters/my-cluster"</span>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>curl<span class="w"> </span><span class="s2">"http://localhost:4588/container/v1/projects/floci-local/locations/us-central1/clusters"</span>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="c1"># Delete a cluster</span>
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>curl<span class="w"> </span>-X<span class="w"> </span>DELETE<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="w">  </span><span class="s2">"http://localhost:4588/container/v1/projects/floci-local/locations/us-central1/clusters/my-cluster"</span>
+</code></pre></div>
+</div>
+<div class="tabbed-block">
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">CLOUDSDK_API_ENDPOINT_OVERRIDES_CONTAINER</span><span class="o">=</span><span class="s2">"http://localhost:4588/container/"</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="c1"># gcloud preflights an API-enablement check; point serviceusage at the emulator and</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="c1"># disable the enable-API prompt (floci-gcp ignores auth).</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="nb">export</span><span class="w"> </span><span class="nv">CLOUDSDK_API_ENDPOINT_OVERRIDES_SERVICEUSAGE</span><span class="o">=</span><span class="s2">"http://localhost:4588/"</span>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="nb">export</span><span class="w"> </span><span class="nv">CLOUDSDK_CORE_SHOULD_PROMPT_TO_ENABLE_API</span><span class="o">=</span><span class="nb">false</span>
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>gcloud<span class="w"> </span>container<span class="w"> </span>clusters<span class="w"> </span>create<span class="w"> </span>my-cluster<span class="w"> </span>--region<span class="o">=</span>us-central1<span class="w"> </span>--async
+<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>gcloud<span class="w"> </span>container<span class="w"> </span>clusters<span class="w"> </span>list<span class="w"> </span>--region<span class="o">=</span>us-central1
+</code></pre></div>
+</div>
+</div>
+</div>
+<h2 id="versions">Versions</h2>
+<p>Each supported Kubernetes minor runs on one pinned k3s release, and is advertised as
+<code>1.&lt;minor&gt;.&lt;k3s patch&gt;-gke.1000000</code> (the build number <code>1000000</code> is fixed and means nothing). The
+channels and defaults follow the <a href="https://docs.cloud.google.com/kubernetes-engine/docs/release-schedule">GKE release schedule</a>
+as of 2026-11-10.</p>
+<table>
+<thead>
+<tr>
+<th>Minor</th>
+<th>k3s image</th>
+<th>Advertised version</th>
+<th>Channels</th>
+<th>Valid master version</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1.32</td>
+<td><code>rancher/k3s:v1.32.13-k3s1</code></td>
+<td><code>1.32.13-gke.1000000</code></td>
+<td>EXTENDED</td>
+<td>no (extended support only)</td>
+</tr>
+<tr>
+<td>1.33</td>
+<td><code>rancher/k3s:v1.33.13-k3s2</code></td>
+<td><code>1.33.13-gke.1000000</code></td>
+<td>EXTENDED</td>
+<td>no (extended support only)</td>
+</tr>
+<tr>
+<td>1.34</td>
+<td><code>rancher/k3s:v1.34.13-k3s1</code></td>
+<td><code>1.34.13-gke.1000000</code></td>
+<td>REGULAR, STABLE, EXTENDED</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>1.35</td>
+<td><code>rancher/k3s:v1.35.10-k3s1</code></td>
+<td><code>1.35.10-gke.1000000</code></td>
+<td>RAPID, REGULAR, STABLE, EXTENDED</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>1.36</td>
+<td><code>rancher/k3s:v1.36.6-k3s1</code></td>
+<td><code>1.36.6-gke.1000000</code></td>
+<td>RAPID, REGULAR, STABLE, EXTENDED</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>1.37</td>
+<td><code>rancher/k3s:v1.37.2-k3s1</code></td>
+<td><code>1.37.2-gke.1000000</code></td>
+<td>RAPID, REGULAR, EXTENDED</td>
+<td>yes</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><code>GetServerConfig</code> lists exactly these versions: <code>validMasterVersions</code> the standard-support minors,
+  <code>validNodeVersions</code> all of them, and one entry per channel with its <code>defaultVersion</code> and
+  <code>validVersions</code>. <code>defaultClusterVersion</code> is the REGULAR channel's default, <code>1.35.10-gke.1000000</code>,
+  as on GKE, where it matches the REGULAR default. Channel defaults: RAPID 1.36, REGULAR, STABLE and
+  EXTENDED 1.35.</li>
+<li>A cluster created without <code>initialClusterVersion</code> gets its <code>releaseChannel</code>'s default, REGULAR's
+  without one. <code>initialClusterVersion</code>, <code>UpdateMaster.masterVersion</code>, <code>desiredMasterVersion</code>,
+  <code>desiredNodeVersion</code>, <code>UpdateNodePool.nodeVersion</code> and a node pool's <code>version</code> accept the
+  documented spellings: <code>latest</code> (the highest version, in the cluster's channel when it has one),
+  <code>-</code> (the default version; for node fields the cluster's master version), <code>1.X</code> and <code>1.X.Y</code> (the
+  advertised version of that minor, when it matches), and an explicit <code>1.X.Y-gke.N</code>.</li>
+<li>An explicit <code>1.X.Y-gke.N</code> of a supported minor is stored as sent even when it is not the
+  advertised version, and runs on that minor's image. A version of any other minor is rejected
+  with <code>400 INVALID_ARGUMENT</code> and <code>Master version "&lt;v&gt;" is unsupported.</code> (<code>Node version ...</code> for
+  node fields); an alias that matches nothing with <code>No valid versions with the prefix "&lt;v&gt;" found.</code>
+  Both messages are the ones GKE users report for retired versions in public issue trackers; they
+  were not checked against the live API.</li>
+<li>The control plane moves up one minor at a time and never down a minor; a patch downgrade within
+  its minor is allowed. Node pools may not run a newer minor than the control plane, nor one more
+  than two minors older. These rules come from
+  <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/upgrading-a-cluster">Upgrade a cluster</a>;
+  the minor-downgrade rejection uses the message that page shows (<code>Master cannot be upgraded to
+  "&lt;v&gt;": specified version is not newer than the current version.</code>), the other messages are the
+  emulator's own.</li>
+<li>On a real cluster, a master version on another minor (<code>UpdateMaster</code>, or <code>UpdateCluster</code> with
+  <code>desiredMasterVersion</code>) recreates the k3s server on that minor's image with the same data volume
+  and host port, as an in-place k3s upgrade does. The cluster is <code>RECONCILING</code> and the operation
+  <code>RUNNING</code> until the API server answers again. A patch change only updates the recorded version.
+  Only a <code>RUNNING</code> cluster can be upgraded (<code>400 FAILED_PRECONDITION</code> otherwise).</li>
+<li>The k3s API server reports its own version (<code>v1.35.10+k3s1</code>), not the GKE one.</li>
+<li>A cluster persisted by an earlier floci-gcp build on a minor that is no longer supported keeps its
+  recorded version and runs on the default release's image.</li>
+</ul>
+<h2 id="kubectl-access">kubectl Access</h2>
+<p>Real (non-mock) clusters run an actual k3s API server, so the native
+<code>gcloud container clusters get-credentials</code> + <code>kubectl</code> flow works end to end:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>gcloud<span class="w"> </span>container<span class="w"> </span>clusters<span class="w"> </span>get-credentials<span class="w"> </span>my-cluster<span class="w"> </span>--region<span class="o">=</span>us-central1
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>kubectl<span class="w"> </span>get<span class="w"> </span>nodes
+</code></pre></div>
+<p><code>get-credentials</code> writes a kubeconfig that authenticates with the GCP access token produced by
+the <code>gke-gcloud-auth-plugin</code>. k3s forwards any bearer token it does not recognise to floci-gcp's
+token-authentication webhook, at an address that names the cluster
+(<code>/_floci-gcp/gke/token-webhook/projects/&lt;project&gt;/locations/&lt;location&gt;/clusters/&lt;cluster&gt;</code>; clusters
+started by an earlier build keep calling the bare <code>/_floci-gcp/gke/token-webhook</code>). The API server
+caches each answer for 30 seconds. Who the token is depends on
+<code>FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Token</th>
+<th><code>disabled</code> (default)</th>
+<th><code>enforce</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Floci-issued service account token (IAM Credentials <code>generateAccessToken</code>)</td>
+<td>username = the service account email, groups <code>system:masters</code></td>
+<td>username = the service account email, groups <code>system:authenticated</code>, plus <code>system:masters</code> when the account holds <code>roles/container.admin</code>, <code>roles/owner</code> or <code>roles/editor</code> on the cluster's project or its recorded organization</td>
+</tr>
+<tr>
+<td>Any other non-empty token (a gcloud user token, a made-up string)</td>
+<td>username <code>floci:gcp-iam</code>, groups <code>system:masters</code></td>
+<td>rejected: the API server answers <code>401</code></td>
+</tr>
+<tr>
+<td>Empty</td>
+<td>rejected</td>
+<td>rejected</td>
+</tr>
+</tbody>
+</table>
+<p>The email username is what GKE uses: RoleBinding subjects for Google accounts and IAM service
+accounts are <code>kind: User</code> with the account's email, and authenticated requests are in
+<code>system:authenticated</code>
+(<a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/role-based-access-control">Role-based access control</a>).
+So under <code>enforce</code> a RoleBinding to <code>deployer@my-project.iam.gserviceaccount.com</code> grants that
+account what it says, and nothing else does unless the account is a project admin. GKE authorizes a
+request when the user has "sufficient permissions according to <em>either</em>" RBAC or IAM (same page);
+the emulator stands in for the IAM side with <code>system:masters</code> for the three admin roles only, so
+narrower roles such as <code>roles/container.developer</code> or <code>roles/container.viewer</code> grant nothing in the
+cluster, and the <code>container.clusters.get</code> permission GKE requires to authenticate is not checked.
+Downscoped tokens count as other tokens. Policy changes reach a cluster once the 30-second cache
+entry expires.</p>
+<p>The cluster endpoint is advertised as a reachable <code>host:port</code>
+(<code>FLOCI_GCP_SERVICES_GKE_ENDPOINT_MODE=host</code>, the default) so the kubeconfig server URL resolves
+correctly. <code>kubectl</code> run inside the control plane container uses k3s's own client certificate and is
+not affected by any of this.</p>
+<p>This flow requires a real cluster: it does not apply in mock mode, where no API server is started.</p>
+<h2 id="restarts-and-persistence">Restarts and persistence</h2>
+<p>With a persistent store (<code>persistent</code>, <code>hybrid</code> or <code>wal</code>), clusters survive an emulator restart.
+At startup each persisted cluster that had not failed goes to <code>RECONCILING</code> while its control
+plane comes back, then to <code>RUNNING</code> once its API server answers again:</p>
+<ul>
+<li>a surviving k3s container (left running by <code>FLOCI_GCP_SERVICES_GKE_KEEP_RUNNING_ON_SHUTDOWN=true</code>,
+  or stopped by a Docker restart) is adopted and started if needed, on the host port it publishes;</li>
+<li>otherwise a new container starts on the surviving data volume, which keeps the cluster's CA and
+  everything stored in it, on the same host port when that port is still free;</li>
+<li>otherwise the cluster starts fresh on a new volume. Its CA changes, so kubeconfigs written before
+  the restart stop working, and a WARN log line says so.</li>
+</ul>
+<p>With the default <code>keep-running-on-shutdown: false</code>, shutdown removes the containers and their
+volumes, so a restart always takes the last path. In <code>memory</code> storage mode nothing is restored.
+<code>DeleteCluster</code> removes the cluster's containers and volumes whatever
+<code>keep-running-on-shutdown</code> says.</p>
+<h2 id="mock-mode">Mock Mode</h2>
+<p>Set <code>FLOCI_GCP_SERVICES_GKE_MOCK=true</code> to create clusters in memory that report <code>RUNNING</code>
+immediately without starting a k3s container. Useful for CI and for tools that provision a
+cluster but never connect to its API server.</p>
+<h2 id="node-pools">Node Pools</h2>
+<p>Node pools are modeled as real, independent resources (not a static field on the cluster):
+<code>CreateCluster</code> provisions a <code>default-pool</code> node pool from the request's top-level
+<code>initialNodeCount</code>/<code>nodeConfig</code> (or from an explicit <code>nodePools[]</code> list), and it can be deleted
+and replaced with separately-managed pools: the standard
+<code>remove_default_node_pool = true</code> + standalone <code>google_container_node_pool</code> pattern used by
+Terraform, OpenTofu, and Pulumi all work end to end.</p>
+<p><code>config</code>, <code>autoscaling</code>, <code>management</code>, <code>upgradeSettings</code>, <code>placementPolicy</code> and
+<code>maxPodsConstraint</code> are stored verbatim from the create/update request and echoed back unchanged on
+every read. Autoscaling, auto-repair and surge upgrades are not enforced.</p>
+<h3 id="nodes-real-mode">Nodes (real mode)</h3>
+<p>On a real cluster every node of every pool is a node of the Kubernetes cluster:</p>
+<ul>
+<li><strong>Control plane.</strong> The k3s server runs with <code>--disable-agent --egress-selector-mode=cluster</code>, so
+  it schedules nothing itself and <code>kubectl get nodes</code> lists only pool nodes, as on GKE. It reaches
+  kubelets (logs, exec, metrics) through the agents' tunnels.</li>
+<li><strong>One container per node.</strong> Each node is a k3s agent container on the cluster's own Docker
+  network (<code>floci-gcp-[&lt;namespace&gt;-]gke-&lt;project&gt;-&lt;cluster&gt;</code>), which also holds the control plane
+  on a fixed address (the tenth of the network's subnet). The control plane is also attached to the
+  emulator's configured network when one is set, so the token webhook and in-Docker clients reach it
+  as before. Each node keeps its data in its own volume.</li>
+<li><strong>Node counts.</strong> A pool's <code>initialNodeCount</code> (and <code>SetNodePoolSize.nodeCount</code>) is per zone, as
+  on GKE: a regional cluster's pool runs that many nodes in each of its zones. Node zones are the
+  pool's <code>locations</code>, defaulting to the cluster's; a region stands for its <code>-a</code>, <code>-b</code> and <code>-c</code>
+  zones. <code>SetLocations</code> and <code>desiredLocations</code> move every pool to the new locations
+  (<a href="https://docs.cloud.google.com/kubernetes-engine/docs/concepts/node-pools">About node pools</a>:
+  "three nodes in each of the cluster's compute zones"; "all of the node pools are replicated to
+  those zones").</li>
+<li><strong>Node cap.</strong> One cluster runs at most <code>FLOCI_GCP_SERVICES_GKE_MAX_NODES_PER_CLUSTER</code> node
+  containers (default 5). They go to pools in creation order, the <code>default-pool</code> first, round the
+  zones; pools past the cap run fewer nodes (possibly none) while the API still reports the
+  requested counts, and a WARN log line names the cap and the pools short of nodes.</li>
+<li><strong>Status and operations.</strong> A new pool is <code>PROVISIONING</code>, a resized, upgraded or moved one
+  <code>RECONCILING</code>, until all its nodes are Ready, then <code>RUNNING</code>; its <code>CreateNodePool</code>,
+  <code>SetNodePoolSize</code> or <code>UpdateNodePool</code> (version) operation stays <code>RUNNING</code> until then. A pool
+  with no node is <code>RUNNING</code> at once. <code>CreateCluster</code> finishes when the API server answers
+  <code>/readyz</code>, whatever the state of the nodes. <code>DeleteNodePool</code> removes the pool's containers and
+  Kubernetes nodes before it returns.</li>
+<li><strong>Versions.</strong> A pool's nodes run the k3s image of the pool's own <code>version</code>. A version on another
+  minor replaces the pool's nodes with new ones (new names), as a GKE node upgrade does.</li>
+</ul>
+<h3 id="node-names-provider-ids-and-instance-groups">Node names, provider IDs and instance groups</h3>
+<p>Names follow what GKE shows in its instance groups and instances (for example
+<code>gke-gke2-default-pool-dabb2ff4-76fs</code> in an instance group
+<code>.../zones/europe-west4-a/instanceGroupManagers/gke-gke2-default-pool-dabb2ff4-grp</code>, in GKE API
+responses captured in Google's <a href="https://github.com/GoogleCloudPlatform/gcpdiag/tree/main/test-data/gke1/json-dumps">gcpdiag test data</a>):</p>
+<ul>
+<li>node: <code>gke-&lt;cluster&gt;-&lt;pool&gt;-&lt;8 hex digits&gt;-&lt;4 characters&gt;</code>, where the hex digits are one hash
+  per pool and zone and the last four characters are random. Cluster and pool names are shortened,
+  keeping their first characters, so the name fits 63 characters; GKE's own shortening rule is not
+  documented.</li>
+<li><code>spec.providerID</code>: <code>gce://&lt;project&gt;/&lt;zone&gt;/&lt;node name&gt;</code>, the GCE cloud provider's form.</li>
+<li><code>instanceGroupUrls</code>: one per zone,
+  <code>https://www.googleapis.com/compute/v1/projects/&lt;project&gt;/zones/&lt;zone&gt;/instanceGroupManagers/gke-&lt;cluster&gt;-&lt;pool&gt;-&lt;hash&gt;-grp</code>,
+  filled in mock and real mode. Compute Engine instance groups are not emulated behind them.</li>
+</ul>
+<div class="admonition warning">
+<p class="admonition-title">Terraform <code>node_count</code> and <code>instanceGroupUrls</code></p>
+<p>The <code>hashicorp/google</code> provider reads a node pool's live <code>node_count</code> by fetching each
+<code>instanceGroupUrls</code> entry from the Compute API. Point <code>compute_custom_endpoint</code> at floci-gcp:
+it answers <code>404</code> for instance group managers, which the provider treats as a stale URL and
+skips, so <code>node_count</code> reads back as <code>0</code>; set <code>ignore_node_count_changes = true</code> (or ignore
+<code>node_count</code> in <code>lifecycle</code>) to keep plans clean. Left on the real Compute endpoint, the
+provider's lookup fails.</p>
+</div>
+<h3 id="node-labels-and-taints">Node labels and taints</h3>
+<p>Every node carries the labels GKE writes into a node's <code>kube-labels</code> (as seen in GKE instance
+templates in the same gcpdiag test data, and named in Google's
+<a href="https://github.com/GoogleCloudPlatform/cluster-autoscaler/blob/main/pkg/cloudprovider/gke/labels/system_labels.go">cluster autoscaler</a>),
+plus the cloud provider's instance-type and topology labels:</p>
+<table>
+<thead>
+<tr>
+<th>Label</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>cloud.google.com/gke-nodepool</code></td>
+<td>pool name (<a href="https://docs.cloud.google.com/kubernetes-engine/docs/concepts/node-pools">About node pools</a>)</td>
+</tr>
+<tr>
+<td><code>cloud.google.com/machine-family</code></td>
+<td>machine series, for example <code>e2</code> (<a href="https://docs.cloud.google.com/kubernetes-engine/docs/concepts/about-custom-compute-classes">ComputeClasses</a>)</td>
+</tr>
+<tr>
+<td><code>cloud.google.com/gke-os-distribution</code></td>
+<td><code>cos</code>, or <code>ubuntu</code> for <code>UBUNTU_CONTAINERD</code></td>
+</tr>
+<tr>
+<td><code>cloud.google.com/gke-container-runtime</code></td>
+<td><code>containerd</code></td>
+</tr>
+<tr>
+<td><code>cloud.google.com/gke-boot-disk</code></td>
+<td><code>config.diskType</code>, default <code>pd-balanced</code></td>
+</tr>
+<tr>
+<td><code>cloud.google.com/gke-max-pods-per-node</code></td>
+<td><code>maxPodsConstraint.maxPodsPerNode</code>, else the cluster's <code>defaultMaxPodsConstraint</code>, else <code>110</code></td>
+</tr>
+<tr>
+<td><code>cloud.google.com/gke-provisioning</code></td>
+<td><code>standard</code>, <code>spot</code> or <code>preemptible</code></td>
+</tr>
+<tr>
+<td><code>cloud.google.com/gke-spot</code> / <code>cloud.google.com/gke-preemptible</code></td>
+<td><code>true</code> on Spot / preemptible pools</td>
+</tr>
+<tr>
+<td><code>cloud.google.com/gke-cpu-scaling-level</code></td>
+<td>vCPU count</td>
+</tr>
+<tr>
+<td><code>cloud.google.com/gke-logging-variant</code></td>
+<td><code>DEFAULT</code></td>
+</tr>
+<tr>
+<td><code>cloud.google.com/gke-stack-type</code></td>
+<td><code>IPV4</code></td>
+</tr>
+<tr>
+<td><code>cloud.google.com/private-node</code></td>
+<td><code>false</code></td>
+</tr>
+<tr>
+<td><code>node.kubernetes.io/instance-type</code></td>
+<td>machine type</td>
+</tr>
+<tr>
+<td><code>topology.kubernetes.io/region</code>, <code>topology.kubernetes.io/zone</code></td>
+<td>node region and zone</td>
+</tr>
+<tr>
+<td><code>iam.gke.io/gke-metadata-server-enabled</code></td>
+<td><code>true</code> on nodes that run the GKE metadata server (see <a href="#workload-identity-federation-for-gke">Workload Identity</a>); absent otherwise</td>
+</tr>
+</tbody>
+</table>
+<p><code>config.labels</code> are added as node labels, and <code>config.taints</code> become node taints
+(<code>NO_SCHEDULE</code>, <code>PREFER_NO_SCHEDULE</code>, <code>NO_EXECUTE</code> map to <code>NoSchedule</code>, <code>PreferNoSchedule</code>,
+<code>NoExecute</code>). Labels and taints apply when a node registers; changing them on an existing pool
+does not relabel its nodes.</p>
+<h3 id="node-size">Node size</h3>
+<p>The machine type (<code>config.machineType</code>, default <code>e2-medium</code>) sizes each node: the container is
+limited to its vCPUs and memory, and the kubelet reserves what GKE reserves, so a node's
+allocatable CPU and memory are GKE's for that machine type (<code>e2-medium</code>: 940m CPU, about 2.9 GiB)
+when the Docker host is at least that big. The reservations follow
+<a href="https://docs.cloud.google.com/kubernetes-engine/docs/concepts/plan-node-sizes">Plan GKE Standard node sizes</a>
+for node versions before 1.37.2-gke.1325000 (all versions this emulator advertises): CPU 6% of
+the first core, 1% of the second, 0.5% of the next two and 0.25% of the rest (1060 millicores on
+shared-core E2 types); memory 255 MiB under 1 GiB, else 25% of the first 4 GiB, 20% of the next 4,
+10% of the next 8, 6% of the next 112 and 2% above 128 GiB; plus a 100 MiB eviction threshold.
+The node's reported capacity is the Docker host's, as a kubelet in a container sees it. Machine
+types are read from their name (<code>&lt;series&gt;-standard|highmem|highcpu-&lt;vCPUs&gt;</code>); accelerator-optimized
+types use the vCPU and memory figures of
+<a href="https://docs.cloud.google.com/compute/docs/accelerator-optimized-machines">Accelerator-optimized machines</a>.
+A machine type the emulator cannot read runs unlimited.</p>
+<h3 id="gpus">GPUs</h3>
+<p>A pool gets GPUs from <code>config.accelerators</code> (the first entry with an <code>acceleratorType</code> and a
+<code>acceleratorCount</code> above zero), or else from its machine type: A2 (<code>nvidia-tesla-a100</code>,
+<code>nvidia-a100-80gb</code>), A3 (<code>nvidia-h100-80gb</code>, <code>nvidia-h100-mega-80gb</code>, <code>nvidia-h200-141gb</code>), A4
+(<code>nvidia-b200</code>), G2 (<code>nvidia-l4</code>) and the whole-GPU G4 types (<code>nvidia-rtx-pro-6000</code>), with the GPU
+counts of
+<a href="https://docs.cloud.google.com/compute/docs/accelerator-optimized-machines">Accelerator-optimized machines</a>.
+The accelerator names are the ones <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/gpus">Run GPUs in GKE Standard node pools</a>
+uses. Each node of such a pool:</p>
+<ul>
+<li>carries <code>cloud.google.com/gke-accelerator=&lt;accelerator type&gt;</code>, the node selector GKE documents;</li>
+<li>advertises <code>nvidia.com/gpu: &lt;count&gt;</code> in its capacity and allocatable, so pods requesting
+  <code>nvidia.com/gpu</code> schedule on it and only up to that count. There is no GPU behind it: the emulator
+  patches the node status where GKE's device plugin would report the devices, and a pod that tries
+  to use CUDA fails;</li>
+<li>is tainted <code>nvidia.com/gpu=present:NoSchedule</code> when the pool is added to a cluster that already
+  has a pool without GPUs, as GKE does. A cluster whose default pool has GPUs, or whose pools all
+  have GPUs, gets no taint, and adding a pool without GPUs later does not taint existing GPU pools
+  (same page). Pools listed in <code>CreateCluster.nodePools</code> count as added in list order.</li>
+</ul>
+<p>The control plane runs the <code>ExtendedResourceToleration</code> admission plugin, as GKE does, so a pod
+requesting <code>nvidia.com/gpu</code> gets the matching toleration. GPU partitioning (MIG, time-sharing),
+<code>gpuDriverInstallationConfig</code> and fractional G4 types are stored and echoed, not modeled.</p>
+<h2 id="storage-classes-real-mode">Storage classes (real mode)</h2>
+<p>A real cluster comes with the StorageClasses GKE Standard clusters have, and claims on them bind.
+k3s's own <code>local-path</code> class is disabled (<code>--disable=local-storage</code>); instead the emulator deploys a
+<a href="https://github.com/rancher/local-path-provisioner"><code>local-path-provisioner</code></a>
+(<code>rancher/local-path-provisioner:v0.0.37</code>, deployment <code>kube-system/floci-pd-provisioner</code>)
+registered as <code>pd.csi.storage.gke.io</code>, the Compute Engine persistent disk CSI driver's name. Volumes
+are directories on the node that runs the pod, kept in the node's data volume.</p>
+<table>
+<thead>
+<tr>
+<th>StorageClass</th>
+<th>Default</th>
+<th>Provisioner</th>
+<th><code>type</code></th>
+<th>Binding mode</th>
+<th>Expansion</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>standard-rwo</code></td>
+<td>yes</td>
+<td><code>pd.csi.storage.gke.io</code></td>
+<td><code>pd-balanced</code></td>
+<td><code>WaitForFirstConsumer</code></td>
+<td><code>true</code></td>
+</tr>
+<tr>
+<td><code>premium-rwo</code></td>
+<td></td>
+<td><code>pd.csi.storage.gke.io</code></td>
+<td><code>pd-ssd</code></td>
+<td><code>WaitForFirstConsumer</code></td>
+<td><code>true</code></td>
+</tr>
+<tr>
+<td><code>standard</code></td>
+<td></td>
+<td><code>pd.csi.storage.gke.io</code> (GKE: <code>kubernetes.io/gce-pd</code>)</td>
+<td><code>pd-standard</code></td>
+<td><code>WaitForFirstConsumer</code> (GKE: <code>Immediate</code>)</td>
+<td><code>true</code></td>
+</tr>
+</tbody>
+</table>
+<p>Sources: GKE pre-installs <code>standard-rwo</code> (balanced persistent disk) and <code>premium-rwo</code> (SSD
+persistent disk) with the CSI driver
+(<a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/gce-pd-csi-driver">Using the Compute Engine persistent disk CSI Driver</a>),
+<code>standard-rwo</code> is the default class for <code>ReadWriteOnce</code> claims and binds <code>WaitForFirstConsumer</code>
+(<a href="https://docs.cloud.google.com/kubernetes-engine/docs/concepts/persistent-volumes">Persistent volumes</a>);
+<code>standard</code> is the in-tree class from the Kubernetes GCE addon
+(<a href="https://github.com/kubernetes/kubernetes/blob/master/cluster/addons/storage-class/gce/default.yaml"><code>cluster/addons/storage-class/gce/default.yaml</code></a>):
+<code>kubernetes.io/gce-pd</code>, <code>pd-standard</code>, expansion allowed, immediate binding. The reclaim policy is
+<code>Delete</code>, the default the persistent volumes page states. The expansion flag of <code>standard-rwo</code> and
+<code>premium-rwo</code> is the one GKE's documented example classes use; GKE's own objects were not checked.</p>
+<p>Deviations, all on what <code>local-path-provisioner</code> can do:</p>
+<ul>
+<li><code>standard</code> names <code>pd.csi.storage.gke.io</code> and binds <code>WaitForFirstConsumer</code>. Under CSI migration
+  Kubernetes hands claims on <code>kubernetes.io/gce-pd</code> to the <code>pd.csi.storage.gke.io</code> provisioner (the
+  claim's <code>volume.kubernetes.io/storage-provisioner</code> annotation says so on GKE too), but
+  <code>local-path-provisioner</code> only provisions for classes naming its own provisioner, and a node-local
+  volume needs the node the pod lands on.</li>
+<li>Expansion is allowed but never completes: nothing resizes the volumes.</li>
+<li><code>ReadWriteMany</code> claims fail to provision (GKE 1.37.1+ maps them to <code>regional-rwx</code>, which is not emulated).</li>
+<li>The provisioner and its helper (<code>rancher/mirrored-library-busybox:1.37.0</code>) are pulled by the nodes
+  from Docker Hub.</li>
+</ul>
+<h2 id="networking">Networking</h2>
+<p>Every cluster, mock or real, gets the Pod and Service ranges GKE would give it, reports them, and a
+real cluster runs on them.</p>
+<ul>
+<li><strong>Mode.</strong> VPC-native unless <code>ipAllocationPolicy.useRoutes</code> is <code>true</code>: "VPC-native is the default
+  network mode for all new clusters ... created through any surface, including ... GKE API"
+  (<a href="https://docs.cloud.google.com/kubernetes-engine/docs/concepts/alias-ips">VPC-native clusters</a>).
+  <code>useRoutes</code> and <code>useIpAliases</code> both <code>true</code> is rejected, as the
+  <a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/rest/v1/projects.locations.clusters">API reference</a>
+  says it cannot be.</li>
+<li><strong>Pod range.</strong> VPC-native: <code>ipAllocationPolicy.clusterIpv4CidrBlock</code>, else the deprecated
+  <code>ipAllocationPolicy.clusterIpv4Cidr</code>, else <code>clusterIpv4Cidr</code>; routes-based: <code>clusterIpv4Cidr</code>. A
+  CIDR is used as given; a bare size (<code>/17</code>) or nothing gets a block of that size (default <code>/14</code>)
+  from <code>10.0.0.0/8</code> that overlaps no range of the project's other clusters on the same network nor
+  the address the cluster reaches the emulator on. GKE picks that block at random
+  (<a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/alias-ips">Create a VPC-native cluster</a>);
+  the emulator takes the first free one so runs are reproducible. Routes-based Pod ranges must be
+  <code>/9</code> to <code>/19</code> (<a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/routes-based-cluster">routes-based cluster</a>).</li>
+<li><strong>Service range.</strong> VPC-native: <code>ipAllocationPolicy.servicesIpv4CidrBlock</code> (or the deprecated
+  <code>servicesIpv4Cidr</code>) when it is a CIDR, else the GKE-managed <code>34.118.224.0/20</code>, which Standard
+  clusters from 1.29 use by default; a bare size of <code>/20</code> or smaller takes the start of that managed
+  range (same VPC-native page). A bare size larger than <code>/20</code> gets a block from <code>10.0.0.0/8</code>, which
+  is a guess. Routes-based: the last <code>/20</code> of the Pod range (<code>10.96.0.0/16</code> gives <code>10.96.240.0/20</code>,
+  the example on the routes-based page).</li>
+<li><strong>Per-node Pod range.</strong> <code>/24</code> on routes-based clusters; on VPC-native ones <code>31 - ceil(log2(Q))</code>
+  with <code>Q</code> the cluster's <code>defaultMaxPodsConstraint.maxPodsPerNode</code> (110 by default, giving <code>/24</code>;
+  64 gives <code>/25</code>), the formula of the VPC-native page. k3s sizes every node's range alike, so a
+  pool's own <code>maxPodsConstraint</code> changes its nodes' maximum Pods but not their range.</li>
+<li><strong>Response.</strong> <code>clusterIpv4Cidr</code> and <code>servicesIpv4Cidr</code> carry the ranges. A VPC-native cluster's
+  <code>ipAllocationPolicy</code> is the request's with <code>useIpAliases: true</code>, <code>clusterIpv4Cidr</code>,
+  <code>clusterIpv4CidrBlock</code>, <code>servicesIpv4Cidr</code>, <code>servicesIpv4CidrBlock</code> filled in and <code>stackType</code>
+  defaulting to <code>IPV4</code>; a routes-based cluster's is echoed as sent, and <code>nodeIpv4CidrSize</code> is set,
+  which the reference says only route-based clusters have.</li>
+<li><strong>Runtime.</strong> The k3s server runs with <code>--cluster-cidr</code>, <code>--service-cidr</code> and the controller
+  manager's <code>node-cidr-mask-size-ipv4</code>, so nodes get their <code>spec.podCIDR</code> from the Pod range, Pods
+  their addresses from it, the <code>kubernetes</code> Service the first Service address (<code>34.118.224.1</code>) and
+  <code>kube-system/kube-dns</code> (CoreDNS, under the Service name GKE uses) the tenth (<code>34.118.224.10</code>),
+  k3s's rule; that GKE's kube-dns takes the tenth address too was not checked in Google docs.</li>
+<li><strong>metrics-server.</strong> k3s's bundled metrics-server is kept, so the resource metrics API that GKE's
+  <a href="https://docs.cloud.google.com/kubernetes-engine/docs/concepts/horizontalpodautoscaler">Horizontal Pod autoscaler</a>
+  queries is served and <code>kubectl top</code> works. How GKE deploys its own metrics-server was not checked.</li>
+<li><strong>Not modeled.</strong> Named secondary ranges (<code>clusterSecondaryRangeName</code>, <code>servicesSecondaryRangeName</code>)
+  are not looked up in Compute: give the CIDR too, or the defaults apply. IPv6 and dual-stack,
+  additional Pod ranges and network policy enforcement are stored and echoed only. A Pod range
+  overlapping the Docker networks of the host breaks node traffic. Clusters stored by an earlier
+  floci-gcp build keep running on k3s's own ranges (<code>10.42.0.0/16</code>, <code>10.43.0.0/16</code>).</li>
+</ul>
+<h2 id="workload-identity-federation-for-gke">Workload Identity Federation for GKE</h2>
+<p>Real clusters run Workload Identity Federation for GKE end to end: a Pod asks the metadata server at
+<code>169.254.169.254</code> (or <code>metadata.google.internal</code>) for a token, the metadata server gets a token for the
+Pod's Kubernetes ServiceAccount from the cluster's API server, exchanges it at floci-gcp's STS for a federated
+token, and, when the ServiceAccount is annotated with <code>iam.gke.io/gcp-service-account</code>, exchanges that for
+the Google service account's token through IAM Credentials <code>generateAccessToken</code>
+(<a href="https://docs.cloud.google.com/kubernetes-engine/docs/concepts/workload-identity">About Workload Identity Federation for GKE</a>,
+<a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/workload-identity">Authenticate to Google Cloud APIs from GKE workloads</a>).
+Google client libraries in the Pod then work unchanged against floci-gcp's APIs.</p>
+<h3 id="cluster-and-node-pool-fields">Cluster and node pool fields</h3>
+<ul>
+<li><code>workloadIdentityConfig.workloadPool</code> accepts only the cluster project's pool, <code>PROJECT_ID.svc.id.goog</code>
+  ("the only accepted workload pool is the workload pool of the Cloud project containing the cluster",
+  <a href="https://docs.cloud.google.com/sdk/gcloud/reference/container/clusters/create"><code>gcloud container clusters create --workload-pool</code></a>).
+  Anything else is <code>400 INVALID_ARGUMENT</code> (GKE's exact code and message are not verified). It is set at
+  create or with <code>UpdateCluster</code> <code>desiredWorkloadIdentityConfig</code>; an empty pool disables Workload Identity,
+  as Terraform sends it, and the key then disappears from <code>GetCluster</code>. The v1beta1 <code>identityNamespace</code>
+  is read as the pool. Autopilot clusters (<code>autopilot.enabled</code>) always get the project's pool.</li>
+<li>Clusters carry an <code>id</code> (64 hex digits; GKE's format is not verified), which the metadata server reports
+  as <code>cluster-uid</code>.</li>
+<li>Node pools: <code>config.workloadMetadataConfig.mode</code> defaults to <code>GKE_METADATA</code> for pools created while the
+  cluster has a workload pool ("All new node pools ... default to using Workload Identity Federation for
+  GKE"), and is stored so Terraform reads a stable value. Enabling Workload Identity later leaves existing
+  pools as they were. <code>GKE_METADATA</code> on a cluster without a workload pool is <code>400 INVALID_ARGUMENT</code> (code
+  not verified). The v1beta1 <code>nodeMetadata</code> is read too (<code>GKE_METADATA_SERVER</code> means <code>GKE_METADATA</code>,
+  <code>EXPOSE</code> and <code>SECURE</code> mean <code>GCE_METADATA</code>). <code>UpdateNodePool</code> applies a new mode in place: the pool's
+  nodes get or lose the <code>iam.gke.io/gke-metadata-server-enabled=true</code> label and their metadata routing
+  changes, without recreating them (whether GKE recreates nodes is not verified). Disabling Workload
+  Identity while pools still say <code>GKE_METADATA</code> is accepted and those nodes then serve Compute Engine
+  metadata (GKE's behavior is not verified).</li>
+</ul>
+<h3 id="issuer-and-keys">Issuer and keys</h3>
+<p>New clusters sign ServiceAccount tokens under GKE's issuer,
+<code>https://container.googleapis.com/v1/projects/PROJECT/locations/LOCATION/clusters/CLUSTER</code>, with
+<code>.../jwks</code> as JWKS URI and the issuer as default token audience (the audience GKE uses was observed by a
+third party, not verified); k3s's own issuer <code>https://kubernetes.default.svc.cluster.local</code> stays accepted
+(<a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/">Kubernetes: ServiceAccount issuer discovery</a>).
+k3s keeps its signing key. After the API server is ready (and after every restore or control plane
+replacement) floci-gcp reads its <code>/openid/v1/jwks</code>; <code>GetJSONWebKeys</code> returns those keys in the <code>Jwk</code>
+fields of <code>cluster_service.proto</code>, and <code>GET .../clusters/CLUSTER/.well-known/openid-configuration</code>
+(<a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/rest/v1/projects.locations.clusters.well-known/getOpenid-configuration">getOpenid-configuration</a>)
+returns the issuer, <code>jwks_uri</code>, <code>response_types_supported: ["id_token"]</code>, <code>subject_types_supported:
+["public"]</code> and <code>id_token_signing_alg_values_supported: ["RS256"]</code>, as the API server's own document does;
+<code>claims_supported</code>, <code>grant_types</code> and the <code>Cache-Control</code> header are not served. Mock clusters return an
+empty key set.</p>
+<p>A cluster stored by an earlier floci-gcp build keeps its server and k3s's issuer when restored. Enabling
+Workload Identity on it with <code>desiredWorkloadIdentityConfig</code> recreates its control plane on its volume with
+the GKE issuer (the <code>UPDATE_CLUSTER</code> operation stays <code>RUNNING</code> until the API server answers again), which
+only a <code>RUNNING</code> cluster can do.</p>
+<h3 id="the-metadata-server-on-each-node">The metadata server on each node</h3>
+<p>GKE runs <code>gke-metadata-server</code> as a DaemonSet that intercepts <code>169.254.169.254:80</code> on each node; Workload
+Identity Pods reach it at <code>169.254.169.252:988</code>, the address a NetworkPolicy must allow. floci-gcp puts a
+small relay container (<code>nginx</code>, <code>FLOCI_GCP_SERVICES_GKE_METADATA_SERVER_RELAY_IMAGE</code>) in each node
+container's network namespace, adds both addresses to the node's loopback, and inserts a
+<code>FLOCI-GKE-METADATA</code> chain first in <code>nat PREROUTING</code>: Pod traffic to <code>169.254.169.254:80</code> goes to the
+<code>169.254.169.252:988</code> listener on nodes that run the GKE metadata server, and to the local
+<code>169.254.169.254:80</code> listener (Compute Engine metadata) on other nodes; node processes and <code>hostNetwork</code> Pods
+reach the local listener directly. The relay forwards every request to floci-gcp with the caller's
+address, which local DNAT preserves and which identifies the Pod (how GKE identifies the Pod is not
+documented; a third party reports the same lookup by client address). A <code>coredns-custom</code> ConfigMap
+(<code>gke-metadata.server</code>) makes <code>metadata.google.internal</code> resolve to <code>169.254.169.254</code> in Pods, and node
+containers resolve it for <code>hostNetwork</code> Pods. k3s re-applies that ConfigMap whenever the control plane
+starts, so edits to it do not last.</p>
+<p>Differences from GKE: no <code>gke-metadata-server</code> DaemonSet is visible in <code>kube-system</code>; the relay is a
+container next to the node. A NetworkPolicy behaves as GKE documents for non-Dataplane-V2 clusters: allowing
+egress to <code>169.254.169.252/32</code> TCP 988 is what lets a Pod reach the metadata server. A relay whose node
+container restarted is recreated within about 15 seconds. When floci-gcp itself runs in a Docker container
+on a network (configured or detected), node containers also join that network so the relay reaches it,
+with <code>--flannel-iface=eth0</code> keeping Pod traffic on the cluster network; natively on Linux they get the
+<code>host.docker.internal</code> host-gateway alias, as the control plane does.</p>
+<p>What the metadata server serves ("Metadata server endpoints"):</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>instance/hostname</code></td>
+<td><code>NODE.ZONE.c.PROJECT.internal</code> (floci-gcp's Compute format; GKE's not verified)</td>
+</tr>
+<tr>
+<td><code>instance/id</code></td>
+<td>a stable 19-digit number derived from the node's provider ID</td>
+</tr>
+<tr>
+<td><code>instance/zone</code></td>
+<td><code>projects/NUMBER/zones/ZONE</code></td>
+</tr>
+<tr>
+<td><code>instance/attributes/cluster-location</code>, <code>cluster-name</code>, <code>cluster-uid</code></td>
+<td>the cluster's location, name and <code>id</code>; other attributes are <code>404</code>, as GKE documents</td>
+</tr>
+<tr>
+<td><code>instance/service-accounts/default/</code> and <code>.../EMAIL/</code></td>
+<td><code>aliases</code>, <code>email</code>, <code>identity</code>, <code>scopes</code>, <code>token</code></td>
+</tr>
+<tr>
+<td><code>project/project-id</code>, <code>project/numeric-project-id</code></td>
+<td>the project and its number</td>
+</tr>
+<tr>
+<td><code>universe/universe-domain</code></td>
+<td><code>googleapis.com</code> (served by floci-gcp's Compute server; GKE not verified)</td>
+</tr>
+</tbody>
+</table>
+<p><code>recursive</code>, <code>alt</code> and redirects behave as floci-gcp's <a href="../compute/">Compute metadata server</a>; requests
+need <code>Metadata-Flavor: Google</code> and must not carry <code>X-Forwarded-For</code> (<code>403</code>, as floci-gcp's Compute server
+does; GKE's handling is not verified), except the root <code>/</code>, which answers <code>computeMetadata/</code> with
+<code>Metadata-Flavor: Google</code> for client-library detection. <code>wait_for_change</code> waits its whole timeout, since
+these values never change while a node runs. With the control plane unreachable, a request that needs it
+answers <code>500</code>, as GKE documents.</p>
+<p>Who the caller is:</p>
+<table>
+<thead>
+<tr>
+<th>Caller</th>
+<th><code>email</code></th>
+<th><code>token</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Pod of a <code>GKE_METADATA</code> node, ServiceAccount annotated <code>iam.gke.io/gcp-service-account: GSA</code></td>
+<td><code>GSA</code></td>
+<td><code>GSA</code>'s access token (<code>generateAccessToken</code> with the federated token)</td>
+</tr>
+<tr>
+<td>Same, not annotated</td>
+<td><code>PROJECT_ID.svc.id.goog</code> (Google's docs say <code>SERVICEACCOUNT_NAME.svc.id.goog</code>; what that placeholder means is <strong>not verified</strong>)</td>
+<td>the federated token itself</td>
+</tr>
+<tr>
+<td>ServiceAccount annotated <code>iam.gke.io/return-principal-id-as-email: "true"</code></td>
+<td>the <code>principal://</code> identifier</td>
+<td>as above</td>
+</tr>
+<tr>
+<td>Node, <code>hostNetwork</code> Pod, or Pod of a <code>GCE_METADATA</code> node</td>
+<td>the pool's <code>config.serviceAccount</code>, else <code>PROJECT_NUMBER-compute@developer.gserviceaccount.com</code></td>
+<td>a Floci-issued token for that account</td>
+</tr>
+</tbody>
+</table>
+<p>Details: the ServiceAccount token is a TokenRequest bound to the Pod with audience <code>PROJECT_ID.svc.id.goog</code>
+and the API server's minimum lifetime of 10 minutes (Google's Secret Manager CSI provider asks for 15;
+GKE's value is not verified); tokens are cached per Pod until five minutes before they expire (client
+libraries refresh "when the token expires in less than 3 minutes 45 seconds"). <code>scopes</code> is
+<code>https://www.googleapis.com/auth/cloud-platform</code> for workloads (not verified) and the pool's
+<code>config.oauthScopes</code>, else gcloud's default node scopes, for nodes. <code>identity?audience=</code> mints the
+annotated Google service account's ID token through IAM Credentials <code>generateIdToken</code>; for an unannotated
+ServiceAccount it answers <code>404</code> (not verified); for nodes it mints the same unsigned token as floci-gcp's
+Compute server. <code>iam.gke.io/credential-quota-project</code> and <code>iam.gke.io/gcp-service-account-delegates</code> are
+ignored.</p>
+<h3 id="granting-access">Granting access</h3>
+<p>Both ways GKE documents work, through floci-gcp's IAM:</p>
+<ul>
+<li>Direct: bind a role to the workload's principal identifier
+  <code>principal://iam.googleapis.com/projects/NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/NAMESPACE/sa/KSA</code>.
+  The other forms IAM documents for the same workload also match: <code>.../kubernetes.serviceaccount.uid/UID</code>,
+  <code>serviceAccount:PROJECT_ID.svc.id.goog[NAMESPACE/KSA]</code>,
+  <code>principalSet://.../namespace/NAMESPACE</code> and <code>principalSet://.../kubernetes.cluster/ISSUER</code>
+  (<a href="https://docs.cloud.google.com/iam/docs/principal-identifiers">Principal identifiers</a>).</li>
+<li>Linked: grant <code>roles/iam.workloadIdentityUser</code> on the Google service account to one of those members and
+  annotate the ServiceAccount ("Both the IAM allow policy and the annotation are required").</li>
+</ul>
+<p>As everywhere in floci-gcp, IAM is only evaluated under <code>FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce</code>.
+With the default <code>disabled</code>, an annotated ServiceAccount gets its Google service account's token without
+any binding. Under <code>enforce</code>, a missing <code>roles/iam.workloadIdentityUser</code> binding, or a Google service
+account that does not exist, makes the <code>token</code> request answer <code>403</code> with the text GKE documents a workload
+logging: <code>generic::permission_denied: loading: GenerateAccessToken("GSA", ""): googleapi: Error 403:
+Permission 'iam.serviceAccounts.getAccessToken' denied on resource (or it may not exist).</code>
+(<a href="https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/authentication">Troubleshoot GKE authentication</a>).
+The status code is modelled on that log line and not verified. Feeding the <code>PROJECT_ID.svc.id.goog</code> email
+to IAM (for example to sign a URL) fails with <code>400 Invalid form of account ID ...</code>, as GCP does.</p>
+<p>Not emulated: Workload Identity Federation pools and providers other than GKE's, the pool as an IAM
+resource, deny policies and Principal Access Boundaries, STS and metadata server quotas, IAM propagation
+delay, and the token webhook accepting federated tokens (they authenticate to the cluster's API server like
+any other token not issued for a service account).</p>
+<h2 id="loadbalancer-services">LoadBalancer Services</h2>
+<p>On GKE a Service of type LoadBalancer gets a regional passthrough Network Load Balancer: external by default,
+internal with <code>networking.gke.io/load-balancer-type: "Internal"</code>
+(<a href="https://docs.cloud.google.com/kubernetes-engine/docs/concepts/service-load-balancer">GKE Service load balancer concepts</a>).
+New real clusters run with k3s's servicelb off (<code>--disable=servicelb</code>) and floci-gcp acts as GKE's controller
+(<code>FLOCI_GCP_SERVICES_GKE_LOAD_BALANCER_MODE=emulated</code>, the default):</p>
+<ul>
+<li><strong>Which Services.</strong> <code>type: LoadBalancer</code> with no <code>loadBalancerClass</code>, or one of GKE's classes
+  <code>networking.gke.io/l4-regional-external</code>, <code>networking.gke.io/l4-regional-internal</code> and
+  <code>networking.gke.io/l4-regional-external-legacy</code>. Services of other classes are left alone, as the cloud
+  provider's controller leaves them
+  (<a href="https://kubernetes.io/docs/concepts/services-networking/service/#load-balancer-class">Kubernetes Services</a>).</li>
+<li><strong>Lifecycle.</strong> The controller adds the <code>service.kubernetes.io/load-balancer-cleanup</code> finalizer before
+  anything else, records <code>EnsuringLoadBalancer</code> and <code>EnsuredLoadBalancer</code> events (<code>Warning</code>
+  <code>SyncLoadBalancerFailed</code> when it cannot serve a Service, which then stays pending) from <code>service-controller</code>, as
+  the cloud provider's service controller does, and writes <code>status.loadBalancer.ingress[0].ip</code>. Deleting the
+  Service, or changing its type or class, removes the load balancer, its address and the finalizer
+  (<code>DeletedLoadBalancer</code>). <code>FLOCI_GCP_SERVICES_GKE_LOAD_BALANCER_PROVISIONING_DELAY</code> keeps new ones pending for a
+  while, as GKE takes "a minute" (<a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/exposing-apps">Exposing applications</a>).</li>
+<li><strong>External addresses</strong> come from <code>203.0.113.0/24</code> (TEST-NET-3, the range GKE's own examples use), unique across
+  all of floci-gcp's clusters, and each is recorded as a Compute Engine regional forwarding rule of the cluster's
+  project, so Compute's external pool never hands it out again (see <a href="../compute/#forwarding-rules-of-gke-load-balancers">Compute</a>).
+  The rule is named <code>a&lt;Service UID&gt;</code> (32 characters) for target-pool load balancers, GKE's default before 1.37
+  or with the <code>-legacy</code> class, and <code>k8s2-&lt;protocol&gt;-&lt;hash&gt;-&lt;namespace&gt;-&lt;name&gt;-&lt;hash&gt;</code> for backend-service based
+  ones (from 1.37, with <code>cloud.google.com/l4-rbs: "enabled"</code> or the external class); the hashes are floci-gcp's,
+  GKE's are not documented. <code>networking.gke.io/load-balancer-ip-addresses</code> (an address resource name; it wins)
+  or <code>spec.loadBalancerIP</code> asks for a reserved address, which must be in the external range
+  (<a href="https://docs.cloud.google.com/kubernetes-engine/docs/concepts/service-load-balancer-parameters">Service load balancer parameters</a>).</li>
+<li><strong>Internal addresses</strong> come from the lower half of the cluster's Docker network subnet (nodes take the upper
+  half), from its twentieth address; <code>spec.loadBalancerIP</code> must be there. GKE takes them from the cluster
+  subnet's primary range; no Compute record is written for them.</li>
+<li><strong>Reachability.</strong> One appliance container per Service, from the cluster's own k3s image (no new image), holds
+  the address (on the cluster network for internal ones, on a <code>floci-gcp-gke-lb-public</code> network of the
+  external range for external ones) and forwards each port to the Service's node port on the cluster's Ready
+  nodes not labelled <code>node.kubernetes.io/exclude-from-external-load-balancers</code>, spread at random. It runs with
+  <code>NET_ADMIN</code> and <code>net.ipv4.ip_forward=1</code>, not privileged, and also joins floci-gcp's own network when floci-gcp
+  runs in a container, so other containers there reach it by name. Every port is
+  also published on <code>127.0.0.1</code> and listed on the Service in the <code>floci.io/load-balancer-host-ports</code> annotation
+  (for example <code>TCP/80=127.0.0.1:41234</code>).</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>From</th>
+<th>Internal address</th>
+<th>External address</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A Pod of the cluster</td>
+<td>yes (kube-proxy, and the appliance)</td>
+<td>yes (kube-proxy)</td>
+</tr>
+<tr>
+<td>A container on the cluster network</td>
+<td>yes</td>
+<td>only when also on the external network</td>
+</tr>
+<tr>
+<td>A container on floci-gcp's network (floci-gcp in Docker)</td>
+<td>the appliance by name or its address there</td>
+<td>same</td>
+</tr>
+<tr>
+<td>The host (macOS or Linux)</td>
+<td><code>127.0.0.1:&lt;host port&gt;</code></td>
+<td><code>127.0.0.1:&lt;host port&gt;</code></td>
+</tr>
+<tr>
+<td>A Linux Docker host</td>
+<td>the address too</td>
+<td>the address too</td>
+</tr>
+</tbody>
+</table>
+<p>Clusters stored by an earlier floci-gcp build keep k3s's servicelb (node addresses in <code>status</code>) when restored,
+including when their control plane is recreated; <code>servicelb</code> mode keeps it on new clusters, and <code>off</code> leaves
+Services pending. Mock clusters run nothing.</p>
+<p>Not emulated: real public addresses, health checks, client source addresses (the appliance masquerades),
+<code>externalTrafficPolicy: Local</code> (every Ready node is a backend), <code>loadBalancerSourceRanges</code>,
+<code>allocateLoadBalancerNodePorts: false</code> (refused with <code>SyncLoadBalancerFailed</code>), IPv6 and dual stack, and GKE's
+<code>service.kubernetes.io/*</code> resource-name annotations, backend services, target pools, health checks and firewall
+rules in Compute. A port or node change recreates the appliance on the same address; the forwarding rule keeps the
+ports it was created with.</p>
+<h2 id="supported-operations">Supported Operations</h2>
+<ul>
+<li><code>CreateCluster</code>, <code>GetCluster</code>, <code>ListClusters</code>, <code>DeleteCluster</code>, <code>UpdateCluster</code>, <code>UpdateMaster</code></li>
+<li><code>SetResourceLabels</code>, <code>SetMasterAuth</code>, <code>SetNetworkPolicy</code>, <code>SetAddonsConfig</code>,
+  <code>SetLoggingService</code>, <code>SetMonitoringService</code>, <code>SetLocations</code>, <code>SetLegacyAbac</code>,
+  <code>SetMaintenancePolicy</code>, <code>StartIPRotation</code>, <code>CompleteIPRotation</code></li>
+<li><code>CreateNodePool</code>, <code>GetNodePool</code>, <code>ListNodePools</code>, <code>DeleteNodePool</code>, <code>UpdateNodePool</code></li>
+<li><code>SetNodePoolAutoscaling</code>, <code>SetNodePoolManagement</code>, <code>SetNodePoolSize</code>,
+  <code>CompleteNodePoolUpgrade</code>, <code>RollbackNodePoolUpgrade</code></li>
+<li><code>GetServerConfig</code>, <code>GetJSONWebKeys</code>, <code>GetOpenIDConfig</code> (<code>.well-known/openid-configuration</code>),
+  <code>ListUsableSubnetworks</code>, <code>CheckAutopilotCompatibility</code>, <code>FetchClusterUpgradeInfo</code>,
+  <code>FetchNodePoolUpgradeInfo</code></li>
+<li><code>GetOperation</code> / <code>ListOperations</code></li>
+</ul>
+<p><code>ListClusters</code> and <code>ListOperations</code> accept <code>-</code> as the location
+(<code>projects/{project}/locations/-</code>) to list across all zones and regions.</p>
+<p>This is the full <code>container.v1</code> <code>ClusterManager</code> RPC surface except
+<code>CancelOperation</code> (operations are always synchronous/<code>DONE</code>, so there is
+nothing in flight to cancel).</p>
+<p><code>GetJSONWebKeys</code> returns the keys of the cluster's API server (empty in mock mode); see
+<a href="#workload-identity-federation-for-gke">Workload Identity</a>. The four other read-only RPCs above report
+honest stub data rather than fabricated analysis, since floci-gcp has no real infrastructure behind them
+to inspect:</p>
+<ul>
+<li><code>ListUsableSubnetworks</code> returns the single synthetic "default"
+  network/subnetwork every cluster in this emulator already defaults to —
+  floci-gcp does not emulate Compute Engine/VPC, so there is no real
+  subnetwork inventory.</li>
+<li><code>CheckAutopilotCompatibility</code> always reports no issues — there is no real
+  policy engine to evaluate a cluster's configuration against.</li>
+<li><code>FetchClusterUpgradeInfo</code>/<code>FetchNodePoolUpgradeInfo</code> report the current
+  version as both current and target with nothing pending: floci-gcp runs no
+  auto-upgrade, so nothing is ever scheduled.</li>
+<li><code>UpdateCluster</code> with <code>desiredNodeVersion</code> upgrades the single node pool named
+  by <code>desiredNodePoolId</code>, matching the real API, where that field is mandatory
+  once a cluster has more than one pool. With exactly one pool the id may be
+  omitted; with several it is required, and a request without it is rejected
+  as <code>400 INVALID_ARGUMENT</code> rather than silently upgrading pools the caller
+  did not name.
+  <code>desiredMasterVersion</code> and <code>desiredNodeVersion</code> accept the same aliases as
+  <code>UpdateMaster</code> below, with the documented difference that <code>-</code> on the node side
+  picks the cluster's current master version rather than the server default. This
+  is what <code>gcloud container clusters upgrade</code> sends when no <code>--cluster-version</code> is
+  given, so both forms of that command leave the cluster on a real version.</li>
+<li><code>UpdateMaster</code> moves only the control plane: <code>currentMasterVersion</code> changes and
+  <code>currentNodeVersion</code> and every node pool's <code>version</code> stay as they were, as in real
+  GKE, where the master and node pools upgrade independently. <code>masterVersion</code> is
+  required (<code>400 INVALID_ARGUMENT</code> when missing). Its aliases and checks are described
+  under <a href="#versions">Versions</a>; a value outside the five documented shapes (a bare <code>1</code>,
+  for example) is rejected with <code>400 INVALID_ARGUMENT</code>. The operation is reported as
+  <code>UPGRADE_MASTER</code>, the <code>Operation.Type</code> real GKE uses.</li>
+</ul>
+<p><strong>Autopilot mode</strong> (<code>autopilot.enabled</code>) and <strong>Fleet/Anthos registration</strong>
+(<code>fleet</code>) are not semantically modeled — floci-gcp does not run a real
+Autopilot node-management control loop or register with a real Fleet — but
+both round-trip correctly through <code>extraConfig</code> like every other config
+block the emulator doesn't act on, so tooling that merely checks
+<code>cluster.autopilot.enabled</code> or <code>cluster.fleet.project</code> works correctly.</p>
+<p>Mutations return a <code>DONE</code> Operation, except on real clusters where the runtime has work to finish:
+<code>CreateCluster</code>, a control plane upgrade onto another minor, <code>CreateNodePool</code>, <code>SetNodePoolSize</code>
+and an <code>UpdateNodePool</code> onto another minor return a <code>RUNNING</code> operation that finishes when the
+control plane or the pool's nodes are ready (see <a href="#versions">Versions</a> and <a href="#nodes-real-mode">Nodes</a>).
+<code>CompleteNodePoolUpgrade</code> returns <code>google.protobuf.Empty</code> (<code>{}</code>) as the real API does.</p>
+<p><code>StartIPRotation</code>/<code>CompleteIPRotation</code> acknowledge the request (bumping the cluster's
+fingerprint/etag) rather than performing a real dual-certificate rotation window — there is no
+live client traffic to migrate off an old certificate in this emulator.
+<code>CompleteNodePoolUpgrade</code>/<code>RollbackNodePoolUpgrade</code> validate the node pool exists, then return
+<code>{}</code> and an Operation respectively; there is no surge upgrade in flight to complete or roll back.
+<code>GetServerConfig</code> is described under
+<a href="#versions">Versions</a>.</p>
+<h2 id="limitations">Limitations</h2>
+<ul>
+<li>Most operations resolve synchronously; on real clusters, cluster creation, control plane
+  upgrades, node pool creation, resizes and node version changes run until the runtime is ready.
+  <code>CancelOperation</code> is not implemented.</li>
+<li>Node IAM is not modeled.</li>
+<li>Real Autopilot node management, the cluster autoscaler and Compute Engine instance groups
+  (<code>node_count</code> read-back, see the warning above) are out of scope; Autopilot mode and Fleet
+  registration round-trip as config but are not semantically enforced.</li>
+<li>Cluster-level config blocks the emulator doesn't act on semantically (network policy
+  enforcement, binary authorization, private cluster networking, etc.) are stored and echoed back
+  verbatim rather than enforced — see the <code>config</code>/<code>autoscaling</code>/<code>management</code> note under Node
+  Pools above, which applies at the cluster level too (<code>extraConfig</code>).</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.top", "navigation.instant", "search.highlight", "search.suggest", "content.code.copy", "content.code.annotate", "content.tabs.link"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
+      
+    
+  </body>
+</html>
