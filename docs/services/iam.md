@@ -30,6 +30,7 @@ which mode is active and the supported service list.
 | Secret Manager | REST JSON and gRPC secret and version operations; see [Secret Manager IAM enforcement](secret-manager.md#iam-enforcement) |
 | IAM service accounts and keys | REST JSON service-account CRUD, key management, IAM policy methods over REST and shared IAM gRPC, `signBlob`, and IAM Credentials `generateAccessToken`, `generateIdToken`, `signBlob`, and `signJwt` |
 | IAM custom roles | REST JSON project and organization role create, get, list, patch, delete, and undelete. Bindings to stored custom roles grant their `includedPermissions` on every surface above except GCS bucket policies. See [Custom roles](#custom-roles) |
+| GKE cluster API authentication | The token webhook of real GKE clusters authenticates only Floci-issued service-account tokens, as their email; `roles/container.admin`, `roles/owner` and `roles/editor` on the project add `system:masters`. See [GKE kubectl access](gke.md#kubectl-access) |
 | GCS ACLs and GCS gRPC | **Not IAM-enforced.** Existing downscoped-token CAB checks still apply |
 | Cloud Run jobs, worker pools, instances, invocation and operations, all other services | **Not IAM-enforced**, including any policies those services store |
 

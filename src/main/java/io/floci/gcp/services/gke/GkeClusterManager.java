@@ -412,10 +412,10 @@ public class GkeClusterManager {
         }
 
         // Wire a token-authentication webhook so the bearer token from gke-gcloud-auth-plugin
-        // (i.e. `gcloud container clusters get-credentials` + kubectl) is validated by floci-gcp
-        // and mapped to cluster-admin — the native GKE auth flow. The kubeconfig is streamed into
+        // (i.e. `gcloud container clusters get-credentials` + kubectl) is reviewed by floci-gcp
+        // (GkeTokenReviewer) — the native GKE auth flow. The kubeconfig is streamed into
         // the container via the Docker API (not bind-mounted) so it works in Docker-in-Docker.
-        String webhookLocalFile = writeWebhookKubeconfig(cluster.getName());
+        String webhookLocalFile = writeWebhookKubeconfig(cluster);
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv("K3S_KUBECONFIG_MODE", "644")
@@ -843,9 +843,10 @@ public class GkeClusterManager {
         return host != null && host.matches("^\\d{1,3}(\\.\\d{1,3}){3}$") ? Optional.of(host) : Optional.empty();
     }
 
-    /** floci-gcp's GKE token-webhook URL, reachable from inside the k3s container. */
-    String webhookUrl() {
-        return "http://" + dockerHostResolver.resolve() + ":" + config.port() + "/_floci-gcp/gke/token-webhook";
+    /** floci-gcp's GKE token-webhook URL for one cluster, reachable from inside the k3s container. */
+    String webhookUrl(StoredCluster cluster) {
+        return "http://" + dockerHostResolver.resolve() + ":" + config.port() + "/_floci-gcp/gke/token-webhook/projects/"
+                + cluster.getProject() + "/locations/" + cluster.getLocation() + "/clusters/" + cluster.getName();
     }
 
     /**
@@ -853,15 +854,15 @@ public class GkeClusterManager {
      * temp file and returns its path, or {@code null} if it could not be written (the caller then
      * skips the webhook so cluster creation still succeeds).
      */
-    private String writeWebhookKubeconfig(String clusterName) {
+    private String writeWebhookKubeconfig(StoredCluster cluster) {
         try {
             Path dir = Files.createTempDirectory("floci-gke-webhook-");
             Path file = dir.resolve(WEBHOOK_CONFIG_FILE);
-            Files.writeString(file, buildWebhookKubeconfig(webhookUrl()));
+            Files.writeString(file, buildWebhookKubeconfig(webhookUrl(cluster)));
             return file.toString();
         } catch (IOException e) {
             LOG.warnv("GKE token-webhook disabled for cluster {0}: could not write kubeconfig: {1}",
-                    clusterName, e.getMessage());
+                    cluster.getName(), e.getMessage());
             return null;
         }
     }

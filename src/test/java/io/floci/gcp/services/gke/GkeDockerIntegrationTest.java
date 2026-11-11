@@ -6,6 +6,7 @@ import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.Container;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.core.common.docker.ContainerStorageHelper;
+import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.gke.model.StoredCluster;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -19,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.api.condition.EnabledIf;
 
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -30,6 +32,8 @@ import java.util.Map;
 import java.util.function.Supplier;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.anyOf;
+import static org.hamcrest.Matchers.is;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -80,6 +84,9 @@ class GkeDockerIntegrationTest {
 
     @Inject
     ContainerLifecycleManager lifecycleManager;
+
+    @Inject
+    CredentialTokenService tokens;
 
     private static GkeService service;
     private static ContainerLifecycleManager docker;
@@ -172,6 +179,23 @@ class GkeDockerIntegrationTest {
 
     @Test
     @Order(4)
+    void authenticatesBearerTokensThroughTheClustersTokenWebhook() {
+        String token = tokens.mintImpersonatedToken("deployer@" + PROJECT + ".iam.gserviceaccount.com",
+                Instant.now().plusSeconds(600)).getTokenValue();
+        URI apiServer = URI.create(stored().getInternalEndpoint());
+        Response review = given().relaxedHTTPSValidation().baseUri(apiServer.getScheme() + "://" + apiServer.getHost())
+                .port(apiServer.getPort())
+                .header("Authorization", "Bearer " + token).contentType("application/json")
+                .body("{\"apiVersion\": \"authentication.k8s.io/v1\", \"kind\": \"SelfSubjectReview\"}")
+                .post("/apis/authentication.k8s.io/v1/selfsubjectreviews");
+        review.then().statusCode(anyOf(is(200), is(201)));
+        assertEquals("deployer@" + PROJECT + ".iam.gserviceaccount.com", review.path("status.userInfo.username"));
+        List<String> groups = review.path("status.userInfo.groups");
+        assertTrue(groups.contains("system:masters") && groups.contains("system:authenticated"), groups.toString());
+    }
+
+    @Test
+    @Order(5)
     void providesGkeStorageClassesAndBindsAVolumeOnTheDefaultOne() throws Exception {
         Map<String, JsonNode> classes = new HashMap<>();
         for (JsonNode sc : JSON.readTree(kubectl("get", "storageclass", "-o", "json")).path("items")) {
@@ -214,7 +238,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(5)
+    @Order(6)
     void resizesPoolsAndAppliesTheirTaints() throws Exception {
         Response resize = given().urlEncodingEnabled(false).contentType("application/json").body("{\"nodeCount\": 2}")
                 .post(BASE + "/clusters/" + CLUSTER + "/nodePools/default-pool:setSize");
@@ -242,7 +266,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void gpuPoolsAdvertiseTheirGpusAndCarryGkesGpuTaint() throws Exception {
         Response gpu = given().contentType("application/json").body("""
                 {"nodePool": {"name": "gpu", "initialNodeCount": 1, "config": {
@@ -285,7 +309,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void restoresAStoppedControlPlane() {
         StoredCluster before = stored();
         docker.getDockerClient().stopContainerCmd(before.getContainerId()).withTimeout(5).exec();
@@ -302,7 +326,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     void upgradesTheControlPlaneOntoTheNextMinorsImage() {
         Response upgrade = given().urlEncodingEnabled(false).contentType("application/json")
                 .body("{\"masterVersion\": \"1.36\"}")
@@ -327,7 +351,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     void deletingTheClusterRemovesItsContainersVolumesAndNetwork() {
         StoredCluster before = stored();
         List<String> volumes = new ArrayList<>();

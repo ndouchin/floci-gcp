@@ -72,8 +72,8 @@ public class IamAuthorizationService {
                         + "generateAccessToken/generateIdToken/signBlob/signJwt and service-account policies over REST/shared IAM gRPC, Cloud Run v2 service/revision REST and shared IAM gRPC, "
                         + "Cloud Scheduler job REST/gRPC, Cloud Logging project/organization sink REST/gRPC, "
                         + "Pub/Sub REST/gRPC, Secret Manager REST/gRPC, Resource Manager REST/project IAM gRPC, Cloud Billing project billingInfo get REST, "
-                        + "IAM project/organization custom-role REST management, and supported GCS REST "
-                        + "bucket/object operations. Custom-role bindings grant their stored permissions except in GCS "
+                        + "IAM project/organization custom-role REST management, supported GCS REST "
+                        + "bucket/object operations, and GKE cluster token reviews. Custom-role bindings grant their stored permissions except in GCS "
                         + "bucket policies. Cloud Run "
                         + "jobs/instances/worker pools/invocation, Cloud Billing billingInfo update, GCS ACLs and GCS gRPC are NOT enforced. "
                         + "GCS Credential Access Boundary checks remain active.",

@@ -169,10 +169,35 @@ kubectl get nodes
 
 `get-credentials` writes a kubeconfig that authenticates with the GCP access token produced by
 the `gke-gcloud-auth-plugin`. k3s forwards any bearer token it does not recognise to floci-gcp's
-token-authentication webhook. Because floci-gcp does not validate credentials, the webhook accepts any
-non-empty token and maps it to `cluster-admin`. The cluster endpoint is advertised as a reachable
-`host:port` (`FLOCI_GCP_SERVICES_GKE_ENDPOINT_MODE=host`, the default) so the kubeconfig server URL
-resolves correctly.
+token-authentication webhook, at an address that names the cluster
+(`/_floci-gcp/gke/token-webhook/projects/<project>/locations/<location>/clusters/<cluster>`; clusters
+started by an earlier build keep calling the bare `/_floci-gcp/gke/token-webhook`). The API server
+caches each answer for 30 seconds. Who the token is depends on
+`FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE`:
+
+| Token | `disabled` (default) | `enforce` |
+|---|---|---|
+| Floci-issued service account token (IAM Credentials `generateAccessToken`) | username = the service account email, groups `system:masters` | username = the service account email, groups `system:authenticated`, plus `system:masters` when the account holds `roles/container.admin`, `roles/owner` or `roles/editor` on the cluster's project or its recorded organization |
+| Any other non-empty token (a gcloud user token, a made-up string) | username `floci:gcp-iam`, groups `system:masters` | rejected: the API server answers `401` |
+| Empty | rejected | rejected |
+
+The email username is what GKE uses: RoleBinding subjects for Google accounts and IAM service
+accounts are `kind: User` with the account's email, and authenticated requests are in
+`system:authenticated`
+([Role-based access control](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/role-based-access-control)).
+So under `enforce` a RoleBinding to `deployer@my-project.iam.gserviceaccount.com` grants that
+account what it says, and nothing else does unless the account is a project admin. GKE authorizes a
+request when the user has "sufficient permissions according to *either*" RBAC or IAM (same page);
+the emulator stands in for the IAM side with `system:masters` for the three admin roles only, so
+narrower roles such as `roles/container.developer` or `roles/container.viewer` grant nothing in the
+cluster, and the `container.clusters.get` permission GKE requires to authenticate is not checked.
+Downscoped tokens count as other tokens. Policy changes reach a cluster once the 30-second cache
+entry expires.
+
+The cluster endpoint is advertised as a reachable `host:port`
+(`FLOCI_GCP_SERVICES_GKE_ENDPOINT_MODE=host`, the default) so the kubeconfig server URL resolves
+correctly. `kubectl` run inside the control plane container uses k3s's own client certificate and is
+not affected by any of this.
 
 This flow requires a real cluster: it does not apply in mock mode, where no API server is started.
 
@@ -449,8 +474,8 @@ nothing in flight to cancel).
 The five read-only RPCs above report honest stub data rather than fabricated
 analysis, since floci-gcp has no real infrastructure behind them to inspect:
 
-- `GetJSONWebKeys` returns an empty key set — floci-gcp accepts any bearer
-  token (no real credential validation), so there is no real signing key to
+- `GetJSONWebKeys` returns an empty key set — floci-gcp issues no workload
+  identity tokens a cluster could sign, so there is no real signing key to
   expose, and a fabricated one would misleadingly imply verifiable tokens are
   possible.
 - `ListUsableSubnetworks` returns the single synthetic "default"
