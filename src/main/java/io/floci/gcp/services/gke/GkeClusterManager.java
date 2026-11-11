@@ -495,6 +495,33 @@ public class GkeClusterManager {
         return result.stdout().trim();
     }
 
+    /** How a node container is wired beyond the cluster network: extra hosts, a second network, agent flags. */
+    record NodeNetworking(List<String> extraHosts, String emulatorNetwork, List<String> agentArgs) {
+    }
+
+    /**
+     * Node containers resolve {@code metadata.google.internal} for {@code hostNetwork} pods, and reach floci-gcp the
+     * way the token webhook does: through {@code host.docker.internal} when it runs natively (Linux needs the
+     * host-gateway alias), or on its own Docker network when it runs in a container. A node on two networks keeps
+     * flannel on the cluster network, the first interface it gets.
+     */
+    static NodeNetworking nodeNetworking(boolean inContainer, String emulatorNetwork, boolean linuxHost) {
+        List<String> hosts = new ArrayList<>(List.of(GkeMetadataRelay.METADATA_HOST + ":" + GkeMetadataRelay.METADATA_IP));
+        if (!inContainer && linuxHost) {
+            hosts.add("host.docker.internal:host-gateway");
+        }
+        if (inContainer && emulatorNetwork != null && !emulatorNetwork.isBlank()) {
+            return new NodeNetworking(hosts, emulatorNetwork, List.of("--flannel-iface=eth0"));
+        }
+        return new NodeNetworking(hosts, null, List.of());
+    }
+
+    /** The Docker network floci-gcp's sidecars join, as the control plane resolves it; null when there is none. */
+    private String emulatorNetwork() {
+        return containerBuilder.newContainer("floci-gke-network-probe")
+                .withDockerNetwork(config.services().gke().dockerNetwork()).build().networkMode();
+    }
+
     /** What a node container is started with, besides its name and the cluster it joins. */
     public record NodeLaunch(String pool, String image, GkeNodes.NodeSpec spec) {
     }
@@ -550,7 +577,10 @@ public class GkeClusterManager {
         lifecycleManager.removeIfExists(containerName, true);
         lifecycleManager.ensureVolume(volumeName);
 
+        NodeNetworking networking = nodeNetworking(containerDetector.isRunningInContainer(), emulatorNetwork(),
+                dockerHostResolver.isLinuxHost());
         List<String> args = new ArrayList<>(List.of("agent", "--node-name=" + node.getName()));
+        args.addAll(networking.agentArgs());
         launch.spec().labels().forEach((k, v) -> args.add("--node-label=" + k + "=" + v));
         launch.spec().taints().forEach(t -> args.add("--node-taint=" + t));
         launch.spec().kubeletArgs().forEach(a -> args.add("--kubelet-arg=" + a));
@@ -570,6 +600,10 @@ public class GkeClusterManager {
                 .withPrivileged(true)
                 .withLogRotation()
                 .withCmd(args);
+        for (String host : networking.extraHosts()) {
+            int colon = host.indexOf(':');
+            builder.withExtraHost(host.substring(0, colon), host.substring(colon + 1));
+        }
         if (launch.spec().memoryBytes() > 0) {
             builder.withMemoryBytes(launch.spec().memoryBytes());
         }
@@ -579,6 +613,9 @@ public class GkeClusterManager {
         ContainerSpec spec = builder.build();
         String containerId = lifecycleManager.create(spec);
         node.setContainerId(containerId);
+        if (networking.emulatorNetwork() != null && !networking.emulatorNetwork().equals(cluster.getNetworkName())) {
+            connect(containerId, networking.emulatorNetwork(), null);
+        }
         lifecycleManager.startCreated(containerId, spec);
         LOG.infov("Started node {0} of GKE cluster {1} ({2})", node.getName(), cluster.getName(), launch.image());
     }
@@ -722,15 +759,20 @@ public class GkeClusterManager {
         if (cluster.getNetworkName() == null) {
             return;
         }
+        connect(containerId, cluster.getNetworkName(), cluster.getServerIp());
+    }
+
+    /** Attaches a created container to a network, on a fixed address when one is given. */
+    void connect(String containerId, String network, String address) {
         ContainerNetwork endpoint = new ContainerNetwork();
-        if (cluster.getServerIp() != null) {
-            endpoint.withIpamConfig(new ContainerNetwork.Ipam().withIpv4Address(cluster.getServerIp()));
+        if (address != null) {
+            endpoint.withIpamConfig(new ContainerNetwork.Ipam().withIpv4Address(address));
         }
-        lifecycleManager.runDockerApi("connect container " + containerId + " to network " + cluster.getNetworkName(),
+        lifecycleManager.runDockerApi("connect container " + containerId + " to network " + network,
                 () -> {
                     lifecycleManager.getDockerClient().connectToNetworkCmd()
                             .withContainerId(containerId)
-                            .withNetworkId(cluster.getNetworkName())
+                            .withNetworkId(network)
                             .withContainerNetwork(endpoint)
                             .exec();
                     return null;
@@ -913,7 +955,7 @@ public class GkeClusterManager {
         }
     }
 
-    /** Drops the manifests k3s applies at startup (GKE's storage classes) into its data volume. */
+    /** Drops the manifests k3s applies at startup (GKE's storage classes, the metadata server's DNS name) into its data volume. */
     private void copyAutoDeployManifests(String containerId, String clusterName) {
         try {
             RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, K3S_DATA_DIR,
@@ -921,6 +963,17 @@ public class GkeClusterManager {
         } catch (Exception e) {
             LOG.warnv("GKE cluster {0} starts without its storage classes: could not copy their manifest into the "
                     + "k3s container: {1}", clusterName, e.getMessage());
+        }
+        if (!config.services().gke().metadataServer().enabled()) {
+            return;
+        }
+        try {
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, K3S_DATA_DIR,
+                    GkeMetadataRelay.DNS_MANIFEST_ENTRY, GkeMetadataRelay.dnsManifest().getBytes(StandardCharsets.UTF_8),
+                    0644);
+        } catch (Exception e) {
+            LOG.warnv("Pods of GKE cluster {0} cannot resolve metadata.google.internal: could not copy its DNS "
+                    + "manifest into the k3s container: {1}", clusterName, e.getMessage());
         }
     }
 

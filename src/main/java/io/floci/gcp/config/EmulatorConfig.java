@@ -377,6 +377,22 @@ public interface EmulatorConfig {
         String endpointMode();
 
         Optional<String> dockerNetwork();
+
+        GkeMetadataServerConfig metadataServer();
+
+        interface GkeMetadataServerConfig {
+            /**
+             * Runs the GKE metadata server for Workload Identity: a relay next to each node, link-local addresses
+             * and routing on the node, and cluster DNS for metadata.google.internal.
+             * Env: FLOCI_GCP_SERVICES_GKE_METADATA_SERVER_ENABLED
+             */
+            @WithDefault("true")
+            boolean enabled();
+
+            /** Image of the per-node relay, an nginx that forwards metadata requests to floci-gcp. */
+            @WithDefault("nginx:1.30.6-alpine")
+            String relayImage();
+        }
     }
 
     interface GcsServiceConfig {

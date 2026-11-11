@@ -58,4 +58,38 @@ class GkeClusterManagerTest {
         assertFalse(GkeClusterManager.serverArgs(cluster(), "n", false).stream()
                 .anyMatch(a -> a.contains("authentication-token-webhook")));
     }
+
+    @Test
+    void nodesResolveTheMetadataServerAndReachANativeEmulatorOnLinux() {
+        GkeClusterManager.NodeNetworking native_ = GkeClusterManager.nodeNetworking(false, null, true);
+        assertEquals(List.of("metadata.google.internal:169.254.169.254", "host.docker.internal:host-gateway"),
+                native_.extraHosts());
+        assertEquals(null, native_.emulatorNetwork());
+        assertEquals(List.of(), native_.agentArgs());
+
+        assertEquals(List.of("metadata.google.internal:169.254.169.254"),
+                GkeClusterManager.nodeNetworking(false, null, false).extraHosts());
+    }
+
+    @Test
+    void nodesJoinTheEmulatorsNetworkWhenItRunsInDockerAndKeepFlannelOnTheClusterNetwork() {
+        GkeClusterManager.NodeNetworking inDocker = GkeClusterManager.nodeNetworking(true, "floci-net", true);
+        assertEquals("floci-net", inDocker.emulatorNetwork());
+        assertEquals(List.of("--flannel-iface=eth0"), inDocker.agentArgs());
+        assertEquals(List.of("metadata.google.internal:169.254.169.254"), inDocker.extraHosts());
+
+        GkeClusterManager.NodeNetworking noNetwork = GkeClusterManager.nodeNetworking(true, null, true);
+        assertEquals(null, noNetwork.emulatorNetwork());
+        assertEquals(List.of(), noNetwork.agentArgs());
+    }
+
+    @Test
+    void clusterDnsSendsMetadataGoogleInternalToTheLinkLocalAddress() {
+        String manifest = GkeMetadataRelay.dnsManifest();
+        assertTrue(manifest.contains("name: coredns-custom"), manifest);
+        assertTrue(manifest.contains("namespace: kube-system"), manifest);
+        assertTrue(manifest.contains("gke-metadata.server: |"), manifest);
+        assertTrue(manifest.contains("metadata.google.internal:53 {"), manifest);
+        assertTrue(manifest.contains("169.254.169.254 metadata.google.internal"), manifest);
+    }
 }

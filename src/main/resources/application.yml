@@ -180,6 +180,11 @@ floci-gcp:
       max-nodes-per-cluster: 5
       endpoint-mode: host
       docker-network:
+      # The GKE metadata server for Workload Identity: an nginx relay next to each node forwards
+      # 169.254.169.254 requests to floci-gcp. Pinned to nginx's stable line.
+      metadata-server:
+        enabled: true
+        relay-image: "nginx:1.30.6-alpine"
     serviceusage:
       enabled: true
       # Reject calls to APIs that are not ENABLED in Service Usage for the caller's project

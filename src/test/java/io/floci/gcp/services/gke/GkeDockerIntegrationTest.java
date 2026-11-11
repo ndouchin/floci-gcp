@@ -195,6 +195,26 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
+    @Order(25)
+    void podsResolveMetadataGoogleInternalToTheMetadataServerAddress() {
+        kubectlApply("""
+                apiVersion: v1
+                kind: Pod
+                metadata: {name: dns-probe, namespace: default}
+                spec:
+                  containers:
+                  - name: probe
+                    image: rancher/mirrored-library-busybox:1.37.0
+                    command: ["sleep", "3600"]
+                """);
+        await("dns-probe Running", () -> "Running".equals(kubectlOrEmpty("get", "pod", "dns-probe", "-o",
+                "jsonpath={.status.phase}")));
+        await("metadata.google.internal resolves", () -> kubectlOrEmpty("exec", "dns-probe", "--", "nslookup",
+                "metadata.google.internal").contains("169.254.169.254"));
+        kubectl("delete", "pod", "dns-probe", "--wait=false");
+    }
+
+    @Test
     @Order(30)
     void appliesThePodAndServiceRangesAndKeepsMetricsServer() throws Exception {
         Response cluster = given().get(BASE + "/clusters/" + CLUSTER);
