@@ -1,9 +1,11 @@
 # Security Token Service (STS)
 
 floci-gcp implements the OAuth 2.0 token-exchange endpoint used by Google
-`DownscopedCredentials`. The endpoint accepts a source access token and a
-Credential Access Boundary (CAB), then returns an emulator-managed downscoped
-access token.
+`DownscopedCredentials` and by Workload Identity Federation for GKE. It exchanges
+a source access token and a Credential Access Boundary (CAB) for an
+emulator-managed downscoped access token, and a GKE cluster's Kubernetes
+ServiceAccount token for a federated access token
+([STS `token` reference](https://docs.cloud.google.com/iam/docs/reference/sts/rest/v1/TopLevel/token)).
 
 ## Configuration
 
@@ -15,9 +17,10 @@ access token.
 
 | Method | Path | Content type |
 |---|---|---|
-| `POST` | `/v1/token` | `application/x-www-form-urlencoded` |
+| `POST` | `/v1/token` | `application/x-www-form-urlencoded`, or `application/json` with snake_case or camelCase field names |
+| `POST` | `/v1/identitybindingtoken` | the same; the legacy `securetoken.googleapis.com` path Google's Secret Manager CSI provider uses for GKE tokens |
 
-The supported exchange requires these form fields:
+No `Authorization` header is read. The downscoping exchange requires these fields:
 
 | Field | Required value |
 |---|---|
@@ -29,6 +32,26 @@ The supported exchange requires these form fields:
 
 Validation failures use the OAuth error fields `error` and
 `error_description`.
+
+## Workload Identity Federation for GKE
+
+With `subject_token_type=urn:ietf:params:oauth:token-type:jwt`, the subject token is a Kubernetes
+ServiceAccount token of a floci-gcp GKE cluster and `audience` is
+`identitynamespace:PROJECT_ID.svc.id.goog:https://container.googleapis.com/v1/projects/PROJECT/locations/LOCATION/clusters/CLUSTER`,
+the form Google's Secret Manager CSI provider and fleet credential files send
+([Fleet Workload Identity](https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs/use-workload-identity)).
+`scope` is accepted and not checked. The token is verified as the STS reference describes a JWT subject
+token: a `kid` and an `RS256` or `ES256` `alg`, a signature by one of the cluster's keys (the keys its API
+server publishes, read again once if the `kid` is unknown), `iss` equal to the cluster's issuer, `aud`
+naming the pool, `exp` in the future, `iat` in the past and no more than 24 hours old; the subject must be
+`system:serviceaccount:NAMESPACE:KSA`, and the cluster must have that workload pool. The answer is a
+`floci-gcp-federated-` token valid for 3600 seconds, whose principal is
+`principal://iam.googleapis.com/projects/NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/NAMESPACE/sa/KSA`
+(see [IAM](iam.md#gke-workload-identity-principals) and [GKE](gke.md#workload-identity-federation-for-gke)).
+
+Token problems answer `400` with `error=invalid_grant`; a missing, malformed or unknown audience, and
+workload identity pool provider audiences (`//iam.googleapis.com/...`, not emulated), answer `400` with
+`error=invalid_request`. Google's exact error codes and descriptions for each case are not verified.
 
 ## Credential Access Boundary support
 
@@ -57,7 +80,8 @@ enabled. Unknown or expired Floci-issued source tokens are rejected with
 
 ## Scope and deviations
 
-- Only access-token-to-access-token exchange is implemented.
+- Only access-token-to-access-token exchange and the GKE Workload Identity JWT exchange are implemented;
+  generic Workload Identity Federation (OIDC and SAML providers of workload identity pools) is not.
 - Only the documented GCS CAB resource, permission, and prefix-expression
   subset is accepted.
 - Non-floci source credentials are not validated, matching the emulator's

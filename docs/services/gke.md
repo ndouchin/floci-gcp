@@ -20,6 +20,8 @@ A lightweight mock mode keeps everything metadata-only.
 | `FLOCI_GCP_SERVICES_GKE_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Leave spawned k3s containers running after floci-gcp shuts down |
 | `FLOCI_GCP_SERVICES_GKE_MAX_NODES_PER_CLUSTER` | `5` | Node containers one cluster runs at most (see [Nodes](#nodes-real-mode)) |
 | `FLOCI_GCP_SERVICES_GKE_DOCKER_NETWORK` | _(none)_ | Overrides `FLOCI_GCP_SERVICES_DOCKER_NETWORK` for GKE/k3s sidecars only |
+| `FLOCI_GCP_SERVICES_GKE_METADATA_SERVER_ENABLED` | `true` | Runs the GKE metadata server on real clusters (see [Workload Identity](#workload-identity-federation-for-gke)) |
+| `FLOCI_GCP_SERVICES_GKE_METADATA_SERVER_RELAY_IMAGE` | `nginx:1.30.6-alpine` | Image of the per-node metadata relay (nginx's stable line, pinned) |
 
 ## Routing: how clients reach GKE
 
@@ -317,6 +319,7 @@ plus the cloud provider's instance-type and topology labels:
 | `cloud.google.com/private-node` | `false` |
 | `node.kubernetes.io/instance-type` | machine type |
 | `topology.kubernetes.io/region`, `topology.kubernetes.io/zone` | node region and zone |
+| `iam.gke.io/gke-metadata-server-enabled` | `true` on nodes that run the GKE metadata server (see [Workload Identity](#workload-identity-federation-for-gke)); absent otherwise |
 
 `config.labels` are added as node labels, and `config.taints` become node taints
 (`NO_SCHEDULE`, `PREFER_NO_SCHEDULE`, `NO_EXECUTE` map to `NoSchedule`, `PreferNoSchedule`,
@@ -451,6 +454,151 @@ real cluster runs on them.
   overlapping the Docker networks of the host breaks node traffic. Clusters stored by an earlier
   floci-gcp build keep running on k3s's own ranges (`10.42.0.0/16`, `10.43.0.0/16`).
 
+## Workload Identity Federation for GKE
+
+Real clusters run Workload Identity Federation for GKE end to end: a Pod asks the metadata server at
+`169.254.169.254` (or `metadata.google.internal`) for a token, the metadata server gets a token for the
+Pod's Kubernetes ServiceAccount from the cluster's API server, exchanges it at floci-gcp's STS for a federated
+token, and, when the ServiceAccount is annotated with `iam.gke.io/gcp-service-account`, exchanges that for
+the Google service account's token through IAM Credentials `generateAccessToken`
+([About Workload Identity Federation for GKE](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/workload-identity),
+[Authenticate to Google Cloud APIs from GKE workloads](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/workload-identity)).
+Google client libraries in the Pod then work unchanged against floci-gcp's APIs.
+
+### Cluster and node pool fields
+
+- `workloadIdentityConfig.workloadPool` accepts only the cluster project's pool, `PROJECT_ID.svc.id.goog`
+  ("the only accepted workload pool is the workload pool of the Cloud project containing the cluster",
+  [`gcloud container clusters create --workload-pool`](https://docs.cloud.google.com/sdk/gcloud/reference/container/clusters/create)).
+  Anything else is `400 INVALID_ARGUMENT` (GKE's exact code and message are not verified). It is set at
+  create or with `UpdateCluster` `desiredWorkloadIdentityConfig`; an empty pool disables Workload Identity,
+  as Terraform sends it, and the key then disappears from `GetCluster`. The v1beta1 `identityNamespace`
+  is read as the pool. Autopilot clusters (`autopilot.enabled`) always get the project's pool.
+- Clusters carry an `id` (64 hex digits; GKE's format is not verified), which the metadata server reports
+  as `cluster-uid`.
+- Node pools: `config.workloadMetadataConfig.mode` defaults to `GKE_METADATA` for pools created while the
+  cluster has a workload pool ("All new node pools ... default to using Workload Identity Federation for
+  GKE"), and is stored so Terraform reads a stable value. Enabling Workload Identity later leaves existing
+  pools as they were. `GKE_METADATA` on a cluster without a workload pool is `400 INVALID_ARGUMENT` (code
+  not verified). The v1beta1 `nodeMetadata` is read too (`GKE_METADATA_SERVER` means `GKE_METADATA`,
+  `EXPOSE` and `SECURE` mean `GCE_METADATA`). `UpdateNodePool` applies a new mode in place: the pool's
+  nodes get or lose the `iam.gke.io/gke-metadata-server-enabled=true` label and their metadata routing
+  changes, without recreating them (whether GKE recreates nodes is not verified). Disabling Workload
+  Identity while pools still say `GKE_METADATA` is accepted and those nodes then serve Compute Engine
+  metadata (GKE's behavior is not verified).
+
+### Issuer and keys
+
+New clusters sign ServiceAccount tokens under GKE's issuer,
+`https://container.googleapis.com/v1/projects/PROJECT/locations/LOCATION/clusters/CLUSTER`, with
+`.../jwks` as JWKS URI and the issuer as default token audience (the audience GKE uses was observed by a
+third party, not verified); k3s's own issuer `https://kubernetes.default.svc.cluster.local` stays accepted
+([Kubernetes: ServiceAccount issuer discovery](https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/)).
+k3s keeps its signing key. After the API server is ready (and after every restore or control plane
+replacement) floci-gcp reads its `/openid/v1/jwks`; `GetJSONWebKeys` returns those keys in the `Jwk`
+fields of `cluster_service.proto`, and `GET .../clusters/CLUSTER/.well-known/openid-configuration`
+([getOpenid-configuration](https://docs.cloud.google.com/kubernetes-engine/docs/reference/rest/v1/projects.locations.clusters.well-known/getOpenid-configuration))
+returns the issuer, `jwks_uri`, `response_types_supported: ["id_token"]`, `subject_types_supported:
+["public"]` and `id_token_signing_alg_values_supported: ["RS256"]`, as the API server's own document does;
+`claims_supported`, `grant_types` and the `Cache-Control` header are not served. Mock clusters return an
+empty key set.
+
+A cluster stored by an earlier floci-gcp build keeps its server and k3s's issuer when restored. Enabling
+Workload Identity on it with `desiredWorkloadIdentityConfig` recreates its control plane on its volume with
+the GKE issuer (the `UPDATE_CLUSTER` operation stays `RUNNING` until the API server answers again), which
+only a `RUNNING` cluster can do.
+
+### The metadata server on each node
+
+GKE runs `gke-metadata-server` as a DaemonSet that intercepts `169.254.169.254:80` on each node; Workload
+Identity Pods reach it at `169.254.169.252:988`, the address a NetworkPolicy must allow. floci-gcp puts a
+small relay container (`nginx`, `FLOCI_GCP_SERVICES_GKE_METADATA_SERVER_RELAY_IMAGE`) in each node
+container's network namespace, adds both addresses to the node's loopback, and inserts a
+`FLOCI-GKE-METADATA` chain first in `nat PREROUTING`: Pod traffic to `169.254.169.254:80` goes to the
+`169.254.169.252:988` listener on nodes that run the GKE metadata server, and to the local
+`169.254.169.254:80` listener (Compute Engine metadata) on other nodes; node processes and `hostNetwork` Pods
+reach the local listener directly. The relay forwards every request to floci-gcp with the caller's
+address, which local DNAT preserves and which identifies the Pod (how GKE identifies the Pod is not
+documented; a third party reports the same lookup by client address). A `coredns-custom` ConfigMap
+(`gke-metadata.server`) makes `metadata.google.internal` resolve to `169.254.169.254` in Pods, and node
+containers resolve it for `hostNetwork` Pods. k3s re-applies that ConfigMap whenever the control plane
+starts, so edits to it do not last.
+
+Differences from GKE: no `gke-metadata-server` DaemonSet is visible in `kube-system`; the relay is a
+container next to the node. A NetworkPolicy behaves as GKE documents for non-Dataplane-V2 clusters: allowing
+egress to `169.254.169.252/32` TCP 988 is what lets a Pod reach the metadata server. A relay whose node
+container restarted is recreated within about 15 seconds. When floci-gcp itself runs in a Docker container
+on a network (configured or detected), node containers also join that network so the relay reaches it,
+with `--flannel-iface=eth0` keeping Pod traffic on the cluster network; natively on Linux they get the
+`host.docker.internal` host-gateway alias, as the control plane does.
+
+What the metadata server serves ("Metadata server endpoints"):
+
+| Key | Value |
+|---|---|
+| `instance/hostname` | `NODE.ZONE.c.PROJECT.internal` (floci-gcp's Compute format; GKE's not verified) |
+| `instance/id` | a stable 19-digit number derived from the node's provider ID |
+| `instance/zone` | `projects/NUMBER/zones/ZONE` |
+| `instance/attributes/cluster-location`, `cluster-name`, `cluster-uid` | the cluster's location, name and `id`; other attributes are `404`, as GKE documents |
+| `instance/service-accounts/default/` and `.../EMAIL/` | `aliases`, `email`, `identity`, `scopes`, `token` |
+| `project/project-id`, `project/numeric-project-id` | the project and its number |
+| `universe/universe-domain` | `googleapis.com` (served by floci-gcp's Compute server; GKE not verified) |
+
+`recursive`, `alt` and redirects behave as floci-gcp's [Compute metadata server](compute.md); requests
+need `Metadata-Flavor: Google` and must not carry `X-Forwarded-For` (`403`, as floci-gcp's Compute server
+does; GKE's handling is not verified), except the root `/`, which answers `computeMetadata/` with
+`Metadata-Flavor: Google` for client-library detection. `wait_for_change` waits its whole timeout, since
+these values never change while a node runs. With the control plane unreachable, a request that needs it
+answers `500`, as GKE documents.
+
+Who the caller is:
+
+| Caller | `email` | `token` |
+|---|---|---|
+| Pod of a `GKE_METADATA` node, ServiceAccount annotated `iam.gke.io/gcp-service-account: GSA` | `GSA` | `GSA`'s access token (`generateAccessToken` with the federated token) |
+| Same, not annotated | `PROJECT_ID.svc.id.goog` (Google's docs say `SERVICEACCOUNT_NAME.svc.id.goog`; what that placeholder means is **not verified**) | the federated token itself |
+| ServiceAccount annotated `iam.gke.io/return-principal-id-as-email: "true"` | the `principal://` identifier | as above |
+| Node, `hostNetwork` Pod, or Pod of a `GCE_METADATA` node | the pool's `config.serviceAccount`, else `PROJECT_NUMBER-compute@developer.gserviceaccount.com` | a Floci-issued token for that account |
+
+Details: the ServiceAccount token is a TokenRequest bound to the Pod with audience `PROJECT_ID.svc.id.goog`
+and the API server's minimum lifetime of 10 minutes (Google's Secret Manager CSI provider asks for 15;
+GKE's value is not verified); tokens are cached per Pod until five minutes before they expire (client
+libraries refresh "when the token expires in less than 3 minutes 45 seconds"). `scopes` is
+`https://www.googleapis.com/auth/cloud-platform` for workloads (not verified) and the pool's
+`config.oauthScopes`, else gcloud's default node scopes, for nodes. `identity?audience=` mints the
+annotated Google service account's ID token through IAM Credentials `generateIdToken`; for an unannotated
+ServiceAccount it answers `404` (not verified); for nodes it mints the same unsigned token as floci-gcp's
+Compute server. `iam.gke.io/credential-quota-project` and `iam.gke.io/gcp-service-account-delegates` are
+ignored.
+
+### Granting access
+
+Both ways GKE documents work, through floci-gcp's IAM:
+
+- Direct: bind a role to the workload's principal identifier
+  `principal://iam.googleapis.com/projects/NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/NAMESPACE/sa/KSA`.
+  The other forms IAM documents for the same workload also match: `.../kubernetes.serviceaccount.uid/UID`,
+  `serviceAccount:PROJECT_ID.svc.id.goog[NAMESPACE/KSA]`,
+  `principalSet://.../namespace/NAMESPACE` and `principalSet://.../kubernetes.cluster/ISSUER`
+  ([Principal identifiers](https://docs.cloud.google.com/iam/docs/principal-identifiers)).
+- Linked: grant `roles/iam.workloadIdentityUser` on the Google service account to one of those members and
+  annotate the ServiceAccount ("Both the IAM allow policy and the annotation are required").
+
+As everywhere in floci-gcp, IAM is only evaluated under `FLOCI_GCP_SERVICES_IAM_AUTHORIZATION_MODE=enforce`.
+With the default `disabled`, an annotated ServiceAccount gets its Google service account's token without
+any binding. Under `enforce`, a missing `roles/iam.workloadIdentityUser` binding, or a Google service
+account that does not exist, makes the `token` request answer `403` with the text GKE documents a workload
+logging: `generic::permission_denied: loading: GenerateAccessToken("GSA", ""): googleapi: Error 403:
+Permission 'iam.serviceAccounts.getAccessToken' denied on resource (or it may not exist).`
+([Troubleshoot GKE authentication](https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/authentication)).
+The status code is modelled on that log line and not verified. Feeding the `PROJECT_ID.svc.id.goog` email
+to IAM (for example to sign a URL) fails with `400 Invalid form of account ID ...`, as GCP does.
+
+Not emulated: Workload Identity Federation pools and providers other than GKE's, the pool as an IAM
+resource, deny policies and Principal Access Boundaries, STS and metadata server quotas, IAM propagation
+delay, and the token webhook accepting federated tokens (they authenticate to the cluster's API server like
+any other token not issued for a service account).
+
 ## Supported Operations
 
 - `CreateCluster`, `GetCluster`, `ListClusters`, `DeleteCluster`, `UpdateCluster`, `UpdateMaster`
@@ -460,8 +608,9 @@ real cluster runs on them.
 - `CreateNodePool`, `GetNodePool`, `ListNodePools`, `DeleteNodePool`, `UpdateNodePool`
 - `SetNodePoolAutoscaling`, `SetNodePoolManagement`, `SetNodePoolSize`,
   `CompleteNodePoolUpgrade`, `RollbackNodePoolUpgrade`
-- `GetServerConfig`, `GetJSONWebKeys`, `ListUsableSubnetworks`,
-  `CheckAutopilotCompatibility`, `FetchClusterUpgradeInfo`, `FetchNodePoolUpgradeInfo`
+- `GetServerConfig`, `GetJSONWebKeys`, `GetOpenIDConfig` (`.well-known/openid-configuration`),
+  `ListUsableSubnetworks`, `CheckAutopilotCompatibility`, `FetchClusterUpgradeInfo`,
+  `FetchNodePoolUpgradeInfo`
 - `GetOperation` / `ListOperations`
 
 `ListClusters` and `ListOperations` accept `-` as the location
@@ -471,13 +620,11 @@ This is the full `container.v1` `ClusterManager` RPC surface except
 `CancelOperation` (operations are always synchronous/`DONE`, so there is
 nothing in flight to cancel).
 
-The five read-only RPCs above report honest stub data rather than fabricated
-analysis, since floci-gcp has no real infrastructure behind them to inspect:
+`GetJSONWebKeys` returns the keys of the cluster's API server (empty in mock mode); see
+[Workload Identity](#workload-identity-federation-for-gke). The four other read-only RPCs above report
+honest stub data rather than fabricated analysis, since floci-gcp has no real infrastructure behind them
+to inspect:
 
-- `GetJSONWebKeys` returns an empty key set — floci-gcp issues no workload
-  identity tokens a cluster could sign, so there is no real signing key to
-  expose, and a fabricated one would misleadingly imply verifiable tokens are
-  possible.
 - `ListUsableSubnetworks` returns the single synthetic "default"
   network/subnetwork every cluster in this emulator already defaults to —
   floci-gcp does not emulate Compute Engine/VPC, so there is no real

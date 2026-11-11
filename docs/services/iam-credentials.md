@@ -34,6 +34,11 @@ Request body:
 
 Response: `{ "accessToken": "...", "expireTime": "..." }`.
 
+A federated GKE workload token (from STS's [Workload Identity Federation for GKE](sts.md#workload-identity-federation-for-gke)
+exchange) may call it too: under `enforce`, it needs `iam.serviceAccounts.getAccessToken` on the target, which
+`roles/iam.workloadIdentityUser` granted to one of the workload's member forms gives. The GKE metadata server
+makes this call for Pods whose Kubernetes ServiceAccount is annotated `iam.gke.io/gcp-service-account`.
+
 ```
 POST /v1/projects/-/serviceAccounts/{serviceAccount}:generateIdToken
 ```
