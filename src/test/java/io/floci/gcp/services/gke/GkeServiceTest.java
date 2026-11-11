@@ -397,6 +397,85 @@ class GkeServiceTest {
     }
 
     @Test
+    void poolsOfAWorkloadIdentityClusterDefaultToTheGkeMetadataServer() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "wi", "initialNodeCount", 1,
+                "workloadIdentityConfig", Map.of("workloadPool", PROJECT + ".svc.id.goog")));
+        service.createNodePool(PROJECT, LOCATION, "wi", Map.of("name", "workers"));
+        service.createNodePool(PROJECT, LOCATION, "wi", Map.of("name", "legacy",
+                "config", Map.of("workloadMetadataConfig", Map.of("mode", "GCE_METADATA"))));
+
+        assertEquals(Map.of("mode", "GKE_METADATA"), service.getNodePool(PROJECT, LOCATION, "wi", "default-pool")
+                .getConfig().get("workloadMetadataConfig"));
+        assertEquals(Map.of("mode", "GKE_METADATA"), service.getNodePool(PROJECT, LOCATION, "wi", "workers")
+                .getConfig().get("workloadMetadataConfig"));
+        assertEquals(Map.of("mode", "GCE_METADATA"), service.getNodePool(PROJECT, LOCATION, "wi", "legacy")
+                .getConfig().get("workloadMetadataConfig"));
+    }
+
+    @Test
+    void enablingWorkloadIdentityLeavesExistingPoolsAlone() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "late", "initialNodeCount", 1));
+        service.updateCluster(PROJECT, LOCATION, "late",
+                Map.of("desiredWorkloadIdentityConfig", Map.of("workloadPool", PROJECT + ".svc.id.goog")));
+        service.createNodePool(PROJECT, LOCATION, "late", Map.of("name", "after"));
+
+        Map<String, Object> existing = service.getNodePool(PROJECT, LOCATION, "late", "default-pool").getConfig();
+        assertTrue(existing == null || !existing.containsKey("workloadMetadataConfig"));
+        assertEquals(Map.of("mode", "GKE_METADATA"), service.getNodePool(PROJECT, LOCATION, "late", "after")
+                .getConfig().get("workloadMetadataConfig"));
+    }
+
+    @Test
+    void theGkeMetadataServerNeedsWorkloadIdentityOnTheCluster() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "plain"));
+        Map<String, Object> gkeMetadata = Map.of("workloadMetadataConfig", Map.of("mode", "GKE_METADATA"));
+
+        GcpException pool = assertThrows(GcpException.class, () -> service.createNodePool(PROJECT, LOCATION, "plain",
+                Map.of("name", "wi", "config", gkeMetadata)));
+        assertEquals(400, pool.getHttpStatus());
+        assertThrows(GcpException.class, () -> service.getNodePool(PROJECT, LOCATION, "plain", "wi"));
+        assertThrows(GcpException.class, () -> service.createCluster(PROJECT, LOCATION,
+                Map.of("name", "half", "nodeConfig", gkeMetadata)));
+        assertThrows(GcpException.class, () -> service.getCluster(PROJECT, LOCATION, "half"));
+        assertThrows(GcpException.class, () -> service.updateNodePool(PROJECT, LOCATION, "plain", "default-pool",
+                gkeMetadata));
+        assertThrows(GcpException.class, () -> service.createCluster(PROJECT, LOCATION, Map.of("name", "beta",
+                "nodeConfig", Map.of("workloadMetadataConfig", Map.of("nodeMetadata", "GKE_METADATA_SERVER")))));
+    }
+
+    @Test
+    void updateNodePoolAppliesTheWorkloadMetadataMode() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "switch",
+                "workloadIdentityConfig", Map.of("workloadPool", PROJECT + ".svc.id.goog")));
+        service.updateNodePool(PROJECT, LOCATION, "switch", "default-pool",
+                Map.of("workloadMetadataConfig", Map.of("mode", "GCE_METADATA")));
+
+        assertEquals(Map.of("mode", "GCE_METADATA"), service.getNodePool(PROJECT, LOCATION, "switch", "default-pool")
+                .getConfig().get("workloadMetadataConfig"));
+    }
+
+    @Test
+    void switchingAPoolsMetadataModeRelabelsItsNodesInPlace() {
+        runRealCluster("relabel", Map.of("initialNodeCount", 1,
+                "workloadIdentityConfig", Map.of("workloadPool", PROJECT + ".svc.id.goog")));
+        service.pollReadiness();
+        markNodesReady("us-central1-a", "relabel");
+        service.pollReadiness();
+        String node = service.getNodePool(PROJECT, "us-central1-a", "relabel", "default-pool").getNodes().get(0).getName();
+
+        service.updateNodePool(PROJECT, "us-central1-a", "relabel", "default-pool",
+                Map.of("workloadMetadataConfig", Map.of("mode", "GCE_METADATA")));
+        verify(clusterManager).unlabelNode(any(), org.mockito.ArgumentMatchers.eq(node),
+                org.mockito.ArgumentMatchers.eq(List.of(GkeNodes.GKE_METADATA_SERVER_LABEL)));
+
+        service.updateNodePool(PROJECT, "us-central1-a", "relabel", "default-pool",
+                Map.of("workloadMetadataConfig", Map.of("mode", "GKE_METADATA")));
+        verify(clusterManager).labelNode(any(), org.mockito.ArgumentMatchers.eq(node),
+                org.mockito.ArgumentMatchers.eq(Map.of(GkeNodes.GKE_METADATA_SERVER_LABEL, "true")));
+        verify(clusterManager, times(1)).startNode(any(), any(), any());
+    }
+
+    @Test
     void aNewClustersNodePoolGetsANodeOnceItsControlPlaneRuns() {
         runRealCluster("nodes", Map.of("initialNodeCount", 1, "nodeConfig", Map.of("machineType", "e2-standard-2")));
         StoredNodePool pool = service.getNodePool(PROJECT, "us-central1-a", "nodes", "default-pool");

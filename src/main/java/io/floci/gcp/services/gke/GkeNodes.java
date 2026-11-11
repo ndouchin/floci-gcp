@@ -1,5 +1,7 @@
 package io.floci.gcp.services.gke;
 
+import io.floci.gcp.core.common.GcpException;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -20,6 +22,10 @@ final class GkeNodes {
     static final String DEFAULT_POOL = "default-pool";
     static final int DEFAULT_MAX_PODS = 110;
     static final String GPU_TAINT = "nvidia.com/gpu=present:NoSchedule";
+    /** The label GKE puts on nodes that run the GKE metadata server, which its DaemonSet selects on. */
+    static final String GKE_METADATA_SERVER_LABEL = "iam.gke.io/gke-metadata-server-enabled";
+    static final String GKE_METADATA = "GKE_METADATA";
+    static final String GCE_METADATA = "GCE_METADATA";
     private static final Pattern ZONE = Pattern.compile("^[a-z]+-[a-z]+\\d+-[a-z]$");
     private static final int MAX_NAME_LENGTH = 63;
     private static final int EVICTION_MB = 100;
@@ -156,6 +162,12 @@ final class GkeNodes {
      */
     static NodeSpec spec(String project, String pool, String zone, String nodeName, Map<String, Object> config,
                          int maxPods, boolean gpuTaint, int hostCpus, long hostMemoryBytes) {
+        return spec(project, pool, zone, nodeName, config, maxPods, gpuTaint, hostCpus, hostMemoryBytes, false);
+    }
+
+    /** As above, for a node that runs the GKE metadata server when {@code gkeMetadataServer} is set. */
+    static NodeSpec spec(String project, String pool, String zone, String nodeName, Map<String, Object> config,
+                         int maxPods, boolean gpuTaint, int hostCpus, long hostMemoryBytes, boolean gkeMetadataServer) {
         Map<String, Object> cfg = config == null ? Map.of() : config;
         String machineType = stringValue(cfg.get("machineType"), GkeMachineTypes.DEFAULT_MACHINE_TYPE);
         GkeMachineTypes.Shape shape = GkeMachineTypes.shape(machineType).orElse(null);
@@ -185,6 +197,9 @@ final class GkeNodes {
         labels.put("topology.kubernetes.io/zone", zone);
         if (accelerator != null) {
             labels.put("cloud.google.com/gke-accelerator", accelerator.type());
+        }
+        if (gkeMetadataServer) {
+            labels.put(GKE_METADATA_SERVER_LABEL, "true");
         }
         if (cfg.get("labels") instanceof Map<?, ?> userLabels) {
             userLabels.forEach((k, v) -> labels.put(String.valueOf(k), String.valueOf(v)));
@@ -238,6 +253,33 @@ final class GkeNodes {
                 .filter(GkeMachineTypes.Shape::hasGpus)
                 .map(shape -> new Accelerator(shape.acceleratorType(), shape.acceleratorCount()))
                 .orElse(null);
+    }
+
+    /**
+     * A pool config's {@code workloadMetadataConfig}: {@code mode} ({@code GKE_METADATA} or {@code GCE_METADATA}), else
+     * the deprecated v1beta1 {@code nodeMetadata} ({@code GKE_METADATA_SERVER} runs the GKE metadata server,
+     * {@code EXPOSE} and {@code SECURE} expose the Compute Engine one). Null when unspecified.
+     */
+    static String metadataMode(Map<String, Object> config) {
+        if (config == null || !(config.get("workloadMetadataConfig") instanceof Map<?, ?> metadata)) {
+            return null;
+        }
+        String mode = metadata.get("mode") instanceof String m ? m : "";
+        String nodeMetadata = metadata.get("nodeMetadata") instanceof String n ? n : "";
+        if (GKE_METADATA.equals(mode) || GCE_METADATA.equals(mode)) {
+            return mode;
+        }
+        if (!mode.isEmpty() && !"MODE_UNSPECIFIED".equals(mode)) {
+            throw GcpException.invalidArgument("Invalid workloadMetadataConfig.mode \"" + mode
+                    + "\": expected GCE_METADATA or GKE_METADATA");
+        }
+        return switch (nodeMetadata) {
+            case "GKE_METADATA_SERVER" -> GKE_METADATA;
+            case "EXPOSE", "SECURE" -> GCE_METADATA;
+            case "", "UNSPECIFIED" -> null;
+            default -> throw GcpException.invalidArgument("Invalid workloadMetadataConfig.nodeMetadata \""
+                    + nodeMetadata + "\"");
+        };
     }
 
     static boolean hasGpus(Map<String, Object> config) {

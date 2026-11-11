@@ -675,6 +675,16 @@ public class GkeClusterManager {
         kubectl(cluster, args);
     }
 
+    /** Removes labels from a registered node. */
+    public void unlabelNode(StoredCluster cluster, String nodeName, List<String> keys) {
+        if (keys.isEmpty()) {
+            return;
+        }
+        List<String> args = new ArrayList<>(List.of("label", "node", nodeName));
+        keys.forEach(k -> args.add(k + "-"));
+        kubectl(cluster, args);
+    }
+
     /** Attaches the created, not yet started, control plane to the cluster network on its fixed address. */
     private void connectToClusterNetwork(StoredCluster cluster, String containerId) {
         if (cluster.getNetworkName() == null) {

@@ -379,6 +379,7 @@ public class GkeService {
                 && Boolean.TRUE.equals(autopilot.get("enabled"))) {
             workloadPool = projectWorkloadPool(project);
         }
+        validateWorkloadMetadata(clusterMap, workloadPool);
         String network = stringField(clusterMap, "network", "default");
         GkeNetworking.Ranges ranges = GkeNetworking.resolve(clusterMap, defaultMaxPods(clusterMap),
                 takenRanges(project, network));
@@ -520,6 +521,32 @@ public class GkeService {
         return pool;
     }
 
+    /** Every create-time pool's {@code workloadMetadataConfig}, checked before anything is stored. */
+    private static void validateWorkloadMetadata(Map<String, Object> clusterMap, String workloadPool) {
+        if (clusterMap.get("nodePools") instanceof List<?> pools && !pools.isEmpty()) {
+            for (Object pool : pools) {
+                if (pool instanceof Map<?, ?> poolMap) {
+                    requireWorkloadMetadataMode(asMap(poolMap.get("config")), workloadPool);
+                }
+            }
+            return;
+        }
+        requireWorkloadMetadataMode(asMap(clusterMap.get("nodeConfig")), workloadPool);
+    }
+
+    /** {@code GKE_METADATA} "can only be enabled if Workload Identity is enabled at the cluster level" (cluster_service.proto). */
+    private static void requireWorkloadMetadataMode(Map<String, Object> config, String workloadPool) {
+        if (GkeNodes.GKE_METADATA.equals(GkeNodes.metadataMode(config)) && workloadPool == null) {
+            throw GcpException.invalidArgument("Workload metadata mode GKE_METADATA requires Workload Identity "
+                    + "Federation for GKE to be enabled on the cluster (workloadIdentityConfig.workloadPool).");
+        }
+    }
+
+    /** Whether a pool's nodes run the GKE metadata server: its mode says so and the cluster still has a workload pool. */
+    static boolean runsGkeMetadataServer(StoredCluster cluster, StoredNodePool pool) {
+        return cluster.getWorkloadPool() != null && GkeNodes.GKE_METADATA.equals(GkeNodes.metadataMode(pool.getConfig()));
+    }
+
     static String projectWorkloadPool(String project) {
         return project + ".svc.id.goog";
     }
@@ -645,8 +672,16 @@ public class GkeService {
             if (desiredMonitoringService != null) {
                 cluster.setMonitoringService(desiredMonitoringService);
             }
-            if (workloadIdentityUpdate) {
+            if (workloadIdentityUpdate && !Objects.equals(cluster.getWorkloadPool(), desiredWorkloadPool)) {
+                Map<String, Boolean> before = new HashMap<>();
+                List<StoredNodePool> pools = listNodePools(project, location, clusterId);
+                pools.forEach(pool -> before.put(pool.getName(), runsGkeMetadataServer(cluster, pool)));
                 cluster.setWorkloadPool(desiredWorkloadPool);
+                for (StoredNodePool pool : pools) {
+                    if (before.get(pool.getName()) != runsGkeMetadataServer(cluster, pool)) {
+                        applyMetadataMode(cluster, pool);
+                    }
+                }
             }
 
             Map<String, Object> stripped = stripPrefix(updateMap, "desired");
@@ -1004,6 +1039,29 @@ public class GkeService {
         return op;
     }
 
+    /**
+     * Brings a pool's running nodes to its metadata mode in place, as GKE applies a {@code workloadMetadataConfig}
+     * change to a pool "immediately": the GKE metadata server label goes on or off. Nodes are not recreated.
+     */
+    private void applyMetadataMode(StoredCluster cluster, StoredNodePool pool) {
+        if (mock() || !"RUNNING".equals(cluster.getStatus()) || pool.getNodes() == null) {
+            return;
+        }
+        boolean gkeMetadata = runsGkeMetadataServer(cluster, pool);
+        for (StoredNode node : pool.getNodes()) {
+            try {
+                if (gkeMetadata) {
+                    clusterManager.labelNode(cluster, node.getName(), Map.of(GkeNodes.GKE_METADATA_SERVER_LABEL, "true"));
+                } else {
+                    clusterManager.unlabelNode(cluster, node.getName(), List.of(GkeNodes.GKE_METADATA_SERVER_LABEL));
+                }
+            } catch (Exception e) {
+                LOG.warnv("Could not apply the metadata mode of node pool {0} to node {1}: {2}", pool.getName(),
+                        node.getName(), e.getMessage());
+            }
+        }
+    }
+
     /** {@code SetLocations} and {@code desiredLocations} move every node pool to the cluster's new node locations. */
     private void moveNodeLocations(String project, String location, String clusterId, StoredCluster cluster) {
         for (StoredNodePool pool : listNodePools(project, location, clusterId)) {
@@ -1076,6 +1134,14 @@ public class GkeService {
         StoredNodePool pool = requireNodePool(project, location, clusterId, nodePoolId);
         boolean newImage = false;
         if (body != null) {
+            Map<String, Object> metadataUpdate = null;
+            if (body.get("workloadMetadataConfig") != null) {
+                metadataUpdate = asMap(body.get("workloadMetadataConfig"));
+                if (metadataUpdate == null) {
+                    throw GcpException.invalidArgument("workloadMetadataConfig must be an object");
+                }
+                requireWorkloadMetadataMode(Map.of("workloadMetadataConfig", metadataUpdate), cluster.getWorkloadPool());
+            }
             String nodeVersion = optionalStringField(body, "nodeVersion");
             if (nodeVersion != null) {
                 String resolved = resolveNodeVersion("nodeVersion", nodeVersion, cluster);
@@ -1084,6 +1150,15 @@ public class GkeService {
             }
             if (body.get("upgradeSettings") != null) {
                 pool.setUpgradeSettings(asMap(body.get("upgradeSettings")));
+            }
+            if (metadataUpdate != null) {
+                boolean before = runsGkeMetadataServer(cluster, pool);
+                Map<String, Object> config = pool.getConfig() == null ? new HashMap<>() : new HashMap<>(pool.getConfig());
+                config.put("workloadMetadataConfig", metadataUpdate);
+                pool.setConfig(config);
+                if (before != runsGkeMetadataServer(cluster, pool)) {
+                    applyMetadataMode(cluster, pool);
+                }
             }
         }
         pool.setEtag(newFingerprint());
@@ -1269,6 +1344,14 @@ public class GkeService {
         pool.setMaxPodsConstraint(asMap(poolMap.get("maxPodsConstraint")));
         pool.setConditions(List.of());
         pool.setConfig(asMap(poolMap.get("config")));
+        String clusterWorkloadPool = clusterStore.get(clusterKey(project, location, clusterId))
+                .map(StoredCluster::getWorkloadPool).orElse(null);
+        requireWorkloadMetadataMode(pool.getConfig(), clusterWorkloadPool);
+        if (clusterWorkloadPool != null && GkeNodes.metadataMode(pool.getConfig()) == null) {
+            Map<String, Object> config = pool.getConfig() == null ? new HashMap<>() : pool.getConfig();
+            config.put("workloadMetadataConfig", Map.of("mode", GkeNodes.GKE_METADATA));
+            pool.setConfig(config);
+        }
         pool.setGpuTaint(GkeNodes.hasGpus(pool.getConfig()) && listNodePools(project, location, clusterId).stream()
                 .anyMatch(other -> !GkeNodes.hasGpus(other.getConfig())));
         pool.setAutoscaling(asMap(poolMap.get("autoscaling")));
@@ -1643,7 +1726,8 @@ public class GkeService {
                 StoredNode node = new StoredNode(GkeNodes.nodeName(cluster.getName(), pool.getName(), hash,
                         uniqueSuffix(pool)), zone);
                 GkeNodes.NodeSpec spec = GkeNodes.spec(cluster.getProject(), pool.getName(), zone, node.getName(),
-                        pool.getConfig(), maxPods(cluster, pool), pool.isGpuTaint(), host.cpus(), host.memoryBytes());
+                        pool.getConfig(), maxPods(cluster, pool), pool.isGpuTaint(), host.cpus(), host.memoryBytes(),
+                        runsGkeMetadataServer(cluster, pool));
                 pool.getNodes().add(node);
                 try {
                     clusterManager.startNode(cluster, node, new GkeClusterManager.NodeLaunch(pool.getName(), image, spec));
@@ -1763,7 +1847,8 @@ public class GkeService {
                 continue;
             }
             GkeNodes.NodeSpec spec = GkeNodes.spec(cluster.getProject(), pool.getName(), node.getZone(),
-                    node.getName(), pool.getConfig(), maxPods(cluster, pool), pool.isGpuTaint(), 0, 0);
+                    node.getName(), pool.getConfig(), maxPods(cluster, pool), pool.isGpuTaint(), 0, 0,
+                    runsGkeMetadataServer(cluster, pool));
             Map<String, String> drifted = new HashMap<>();
             spec.labels().forEach((k, v) -> {
                 if (!v.equals(state.labels().get(k))) {
