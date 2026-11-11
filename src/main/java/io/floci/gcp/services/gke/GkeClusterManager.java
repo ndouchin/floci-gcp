@@ -34,6 +34,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -66,6 +67,8 @@ public class GkeClusterManager {
     static final String ROLE_LABEL = "io.floci.gke-role";
     static final String ROLE_CONTROL_PLANE = "control-plane";
     static final String ROLE_NODE = "node";
+    static final String ROLE_METADATA_RELAY = "metadata-relay";
+    private static final String RELAY_SUFFIX = "-metadata";
     static final String NODE_POOL_LABEL = "io.floci.gke-node-pool";
     static final String NODE_LABEL = "io.floci.gke-node";
     private static final String K3S_DATA_DIR = "/var/lib/rancher/k3s";
@@ -174,7 +177,7 @@ public class GkeClusterManager {
     public RestoreOutcome restoreCluster(StoredCluster cluster) {
         Optional<Container> survivor = lifecycleManager.listContainersByLabels("list GKE control plane containers",
                         identityFilter(cluster)).stream()
-                .filter(c -> !ROLE_NODE.equals(labelOf(c, ROLE_LABEL)))
+                .filter(c -> labelOf(c, ROLE_LABEL) == null || ROLE_CONTROL_PLANE.equals(labelOf(c, ROLE_LABEL)))
                 .findFirst();
         if (survivor.isPresent() && ROLE_CONTROL_PLANE.equals(labelOf(survivor.get(), ROLE_LABEL))
                 && cluster.getServerIp() != null) {
@@ -634,8 +637,11 @@ public class GkeClusterManager {
         }
     }
 
-    /** Removes a node's container and volume. */
+    /** Removes a node's container, its metadata relay and its volume. */
     public void removeNode(StoredNode node) {
+        if (node.getContainerName() != null) {
+            lifecycleManager.removeIfExists(node.getContainerName() + RELAY_SUFFIX, true);
+        }
         String id = node.getContainerId() != null ? node.getContainerId() : node.getContainerName();
         if (id != null) {
             lifecycleManager.forceRemove(id, null, true);
@@ -645,8 +651,19 @@ public class GkeClusterManager {
         }
     }
 
-    /** Removes every node container of the cluster whose container name is not in {@code keep}, with its volume. */
+    /** Removes every node container of the cluster whose container name is not in {@code keep}, with its volume and relay. */
     public void removeNodeContainers(StoredCluster cluster, Set<String> keep) {
+        Map<String, String> relayFilter = new HashMap<>(identityFilter(cluster));
+        relayFilter.put(ROLE_LABEL, ROLE_METADATA_RELAY);
+        List<Container> relays = lifecycleManager.listContainersByLabels("list GKE metadata relays", relayFilter);
+        for (Container relay : relays == null ? List.<Container>of() : relays) {
+            String name = relay.getNames() == null || relay.getNames().length == 0 ? null
+                    : relay.getNames()[0].replaceFirst("^/", "");
+            if (name == null || !name.endsWith(RELAY_SUFFIX)
+                    || !keep.contains(name.substring(0, name.length() - RELAY_SUFFIX.length()))) {
+                lifecycleManager.forceRemove(relay.getId(), null, true);
+            }
+        }
         Map<String, String> filter = new HashMap<>(identityFilter(cluster));
         filter.put(ROLE_LABEL, ROLE_NODE);
         List<Container> containers = lifecycleManager.listContainersByLabels("list GKE node containers", filter);
@@ -665,6 +682,78 @@ public class GkeClusterManager {
             }
             LOG.infov("Removed node container {0} of GKE cluster {1}", name, cluster.getName());
         }
+    }
+
+    /**
+     * Gives a node its GKE metadata server: link-local addresses and routing in its network namespace, and an nginx
+     * relay sharing that namespace that forwards to floci-gcp. A relay that started after its node is kept; one the
+     * node outlived (a node restart leaves it in the old namespace) is recreated.
+     */
+    public void ensureMetadataRelay(StoredCluster cluster, StoredNode node, boolean gkeMetadata) {
+        programMetadataRouting(cluster, node, gkeMetadata);
+        if (metadataRelayCurrent(node)) {
+            return;
+        }
+        String relayName = node.getContainerName() + RELAY_SUFFIX;
+        lifecycleManager.removeIfExists(relayName, true);
+        Map<String, String> labels = new HashMap<>(identityFilter(cluster));
+        labels.put(ROLE_LABEL, ROLE_METADATA_RELAY);
+        labels.put(NODE_LABEL, node.getName());
+        ContainerSpec spec = containerBuilder.newContainer(config.services().gke().metadataServer().relayImage())
+                .withName(relayName)
+                .withLabels(labels)
+                .withNetworkMode("container:" + nodeContainer(node))
+                .withEntrypoint(List.of("nginx"))
+                .withCmd(List.of("-g", "daemon off;"))
+                .withLogRotation()
+                .build();
+        String relayId = lifecycleManager.create(spec);
+        RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), relayId, "/etc/nginx", "nginx.conf",
+                GkeMetadataRelay.nginxConfig(metadataUpstream(cluster, node), cluster.getMetadataRelayKey())
+                        .getBytes(StandardCharsets.UTF_8), 0644);
+        lifecycleManager.startCreated(relayId, spec);
+        LOG.infov("Started the metadata relay of node {0} of GKE cluster {1}", node.getName(), cluster.getName());
+    }
+
+    /** Points a node's pod traffic for {@code 169.254.169.254} at the GKE or the Compute Engine metadata listener. */
+    public void programMetadataRouting(StoredCluster cluster, StoredNode node, boolean gkeMetadata) {
+        ContainerLifecycleManager.ExecResult result = lifecycleManager.exec(nodeContainer(node), List.of(),
+                List.of("sh", "-c", GkeMetadataRelay.nodeScript(cluster.getClusterIpv4Cidr(), gkeMetadata)));
+        if (result == null || result.exitCode() != 0) {
+            throw new IllegalStateException("could not route metadata requests on node " + node.getName() + ": "
+                    + (result == null ? "no result" : result.stderr()));
+        }
+    }
+
+    /** Whether a node's metadata relay runs and started after the node container last did. */
+    public boolean metadataRelayCurrent(StoredNode node) {
+        try {
+            InspectContainerResponse relay = lifecycleManager.runDockerApi("inspect metadata relay",
+                    () -> lifecycleManager.getDockerClient().inspectContainerCmd(node.getContainerName() + RELAY_SUFFIX)
+                            .exec());
+            InspectContainerResponse host = lifecycleManager.runDockerApi("inspect node container",
+                    () -> lifecycleManager.getDockerClient().inspectContainerCmd(nodeContainer(node)).exec());
+            if (!Boolean.TRUE.equals(relay.getState().getRunning()) || !Boolean.TRUE.equals(host.getState().getRunning())) {
+                return false;
+            }
+            return !Instant.parse(relay.getState().getStartedAt()).isBefore(Instant.parse(host.getState().getStartedAt()));
+        } catch (NotFoundException e) {
+            return false;
+        } catch (RuntimeException e) {
+            LOG.debugv("Could not inspect the metadata relay of node {0}: {1}", node.getName(), e.getMessage());
+            return false;
+        }
+    }
+
+    private static String nodeContainer(StoredNode node) {
+        return node.getContainerId() != null ? node.getContainerId() : node.getContainerName();
+    }
+
+    /** floci-gcp's metadata responder for one node, as its relay calls it. */
+    String metadataUpstream(StoredCluster cluster, StoredNode node) {
+        return "http://" + dockerHostResolver.resolve() + ":" + config.port() + "/_floci-gcp/gke/metadata/projects/"
+                + cluster.getProject() + "/locations/" + cluster.getLocation() + "/clusters/" + cluster.getName()
+                + "/nodes/" + node.getName() + "/";
     }
 
     /** Runs kubectl in the control plane container. */

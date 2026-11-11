@@ -92,6 +92,8 @@ public class StoredCluster {
     private boolean gkeServiceAccountIssuer;
     /** The JSON Web Key Set the control plane publishes at {@code /openid/v1/jwks}, read once it is ready. */
     private String jwks;
+    /** The secret the cluster's metadata relays present to floci-gcp's metadata responder. */
+    private String metadataRelayKey;
 
     public StoredCluster() {
     }
@@ -154,6 +156,7 @@ public class StoredCluster {
         this.workloadPool = other.workloadPool;
         this.gkeServiceAccountIssuer = other.gkeServiceAccountIssuer;
         this.jwks = other.jwks;
+        this.metadataRelayKey = other.metadataRelayKey;
     }
 
     public String getName() {
@@ -530,5 +533,13 @@ public class StoredCluster {
 
     public void setJwks(String jwks) {
         this.jwks = jwks;
+    }
+
+    public String getMetadataRelayKey() {
+        return metadataRelayKey;
+    }
+
+    public void setMetadataRelayKey(String metadataRelayKey) {
+        this.metadataRelayKey = metadataRelayKey;
     }
 }

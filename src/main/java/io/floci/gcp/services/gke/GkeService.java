@@ -98,6 +98,9 @@ public class GkeService {
     private final SecureRandom random = new SecureRandom();
     /** Create operations whose cluster has an unreadable {@code createTime}, already logged once. */
     private final Set<String> unreadableCreateTimes = ConcurrentHashMap.newKeySet();
+    /** When each cluster's metadata relays were last set up or checked. */
+    private final Map<String, Instant> relayWatches = new ConcurrentHashMap<>();
+    static final Duration RELAY_WATCH_INTERVAL = Duration.ofSeconds(15);
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "gke-readiness-poller");
         t.setDaemon(true);
@@ -324,6 +327,10 @@ public class GkeService {
                 cluster.setId(newClusterId());
                 changed = true;
             }
+            if (cluster.getMetadataRelayKey() == null) {
+                cluster.setMetadataRelayKey(newClusterId());
+                changed = true;
+            }
             if (cluster.getExtraConfig() != null && cluster.getExtraConfig().containsKey("workloadIdentityConfig")) {
                 Object echoed = cluster.getExtraConfig().get("workloadIdentityConfig");
                 if (cluster.getWorkloadPool() == null && echoed instanceof Map<?, ?> m
@@ -420,6 +427,7 @@ public class GkeService {
         cluster.setExtraConfig(extraFields(clusterMap, TYPED_CLUSTER_FIELDS));
         cluster.setWorkloadPool(workloadPool);
         cluster.setGkeServiceAccountIssuer(true);
+        cluster.setMetadataRelayKey(newClusterId());
         if (!ranges.routesBased()) {
             putExtraConfig(cluster, "ipAllocationPolicy", vpcNativePolicy(clusterMap.get("ipAllocationPolicy"), ranges));
         }
@@ -1135,6 +1143,9 @@ public class GkeService {
         boolean gkeMetadata = runsGkeMetadataServer(cluster, pool);
         for (StoredNode node : pool.getNodes()) {
             try {
+                if (metadataServerEnabled()) {
+                    clusterManager.programMetadataRouting(cluster, node, gkeMetadata);
+                }
                 if (gkeMetadata) {
                     clusterManager.labelNode(cluster, node.getName(), Map.of(GkeNodes.GKE_METADATA_SERVER_LABEL, "true"));
                 } else {
@@ -1669,6 +1680,10 @@ public class GkeService {
                 } catch (Exception e) {
                     LOG.errorv(e, "Error reconciling the nodes of GKE cluster {0}", cluster.getName());
                 }
+                Instant watched = relayWatches.get(clusterKey(cluster.getProject(), cluster.getLocation(), cluster.getName()));
+                if (metadataServerEnabled() && (watched == null || watched.plus(RELAY_WATCH_INTERVAL).isBefore(Instant.now()))) {
+                    watchMetadataRelays(cluster.getProject(), cluster.getLocation(), cluster.getName());
+                }
             }
         }
     }
@@ -1803,6 +1818,7 @@ public class GkeService {
         removeNodes(cluster, dropped);
         boolean changed = !dropped.isEmpty();
         pool.setNodes(new ArrayList<>(kept));
+        kept.forEach(node -> ensureMetadataRelay(cluster, pool, node));
         GkeClusterManager.HostResources host = clusterManager.hostResources();
         for (Map.Entry<String, Integer> slot : wanted.entrySet()) {
             for (int i = 0; i < slot.getValue(); i++) {
@@ -1822,6 +1838,7 @@ public class GkeService {
                     failPool(cluster, pool, "Could not start node " + node.getName() + ": " + e.getMessage());
                     return;
                 }
+                ensureMetadataRelay(cluster, pool, node);
                 changed = true;
                 nodePoolStore.put(poolKey, pool);
             }
@@ -1830,6 +1847,55 @@ public class GkeService {
             pool.setStatus("RECONCILING");
         }
         nodePoolStore.put(poolKey, pool);
+    }
+
+    private boolean metadataServerEnabled() {
+        return config.services().gke().metadataServer().enabled();
+    }
+
+    /** Gives a node its metadata relay and routing; a failure leaves the node running without the metadata server. */
+    private void ensureMetadataRelay(StoredCluster cluster, StoredNodePool pool, StoredNode node) {
+        if (!metadataServerEnabled()) {
+            return;
+        }
+        try {
+            clusterManager.ensureMetadataRelay(cluster, node, runsGkeMetadataServer(cluster, pool));
+        } catch (Exception e) {
+            LOG.warnv("Node {0} of GKE cluster {1} runs without a metadata server: {2}", node.getName(),
+                    cluster.getName(), e.getMessage());
+        }
+        relayWatches.put(clusterKey(cluster.getProject(), cluster.getLocation(), cluster.getName()), Instant.now());
+    }
+
+    /**
+     * Brings back the metadata relay of a node whose container restarted since its relay started (a restarted
+     * container gets a new network namespace, which the old relay does not follow), and puts each node's metadata
+     * routing first again.
+     */
+    void watchMetadataRelays(String project, String location, String clusterId) {
+        String key = clusterKey(project, location, clusterId);
+        relayWatches.put(key, Instant.now());
+        synchronized (clusterLock(key)) {
+            StoredCluster cluster = clusterStore.get(key).orElse(null);
+            if (cluster == null || !"RUNNING".equals(cluster.getStatus()) || cluster.isNodesOutOfDate()) {
+                return;
+            }
+            for (StoredNodePool pool : listNodePools(project, location, clusterId)) {
+                for (StoredNode node : pool.getNodes() == null ? List.<StoredNode>of() : pool.getNodes()) {
+                    try {
+                        if (clusterManager.metadataRelayCurrent(node)) {
+                            clusterManager.programMetadataRouting(cluster, node, runsGkeMetadataServer(cluster, pool));
+                        } else {
+                            LOG.infov("The metadata relay of node {0} of GKE cluster {1} is gone or stale; recreating it",
+                                    node.getName(), clusterId);
+                            clusterManager.ensureMetadataRelay(cluster, node, runsGkeMetadataServer(cluster, pool));
+                        }
+                    } catch (Exception e) {
+                        LOG.debugv("Could not check the metadata relay of node {0}: {1}", node.getName(), e.getMessage());
+                    }
+                }
+            }
+        }
     }
 
     private String uniqueSuffix(StoredNodePool pool) {

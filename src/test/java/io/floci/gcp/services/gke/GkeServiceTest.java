@@ -56,6 +56,8 @@ class GkeServiceTest {
     EmulatorConfig.GkeServiceConfig gkeConfig;
     @Mock
     GkeClusterManager clusterManager;
+    @Mock
+    EmulatorConfig.GkeServiceConfig.GkeMetadataServerConfig metadataServer;
 
     private GkeService service;
     private InMemoryStorage<String, StoredOperation> operationStore;
@@ -83,6 +85,8 @@ class GkeServiceTest {
         when(services.gke()).thenReturn(gkeConfig);
         when(gkeConfig.mock()).thenReturn(true);
         when(gkeConfig.maxNodesPerCluster()).thenReturn(5);
+        when(gkeConfig.metadataServer()).thenReturn(metadataServer);
+        when(metadataServer.enabled()).thenReturn(true);
         when(config.baseUrl()).thenReturn("http://localhost:4588");
         when(clusterManager.imageFor(any())).thenAnswer(inv -> "k3s:" + GkeReleases.minorOf(inv.getArgument(0)));
         when(clusterManager.hostResources()).thenReturn(new GkeClusterManager.HostResources(6, 10L << 30));
@@ -473,6 +477,52 @@ class GkeServiceTest {
         verify(clusterManager).labelNode(any(), org.mockito.ArgumentMatchers.eq(node),
                 org.mockito.ArgumentMatchers.eq(Map.of(GkeNodes.GKE_METADATA_SERVER_LABEL, "true")));
         verify(clusterManager, times(1)).startNode(any(), any(), any());
+        verify(clusterManager).programMetadataRouting(any(), org.mockito.ArgumentMatchers.argThat(n ->
+                node.equals(n.getName())), org.mockito.ArgumentMatchers.eq(false));
+        verify(clusterManager).programMetadataRouting(any(), org.mockito.ArgumentMatchers.argThat(n ->
+                node.equals(n.getName())), org.mockito.ArgumentMatchers.eq(true));
+    }
+
+    @Test
+    void everyNodeGetsAMetadataRelayOnceItsContainerStarts() {
+        runRealCluster("relays", Map.of("initialNodeCount", 1,
+                "workloadIdentityConfig", Map.of("workloadPool", PROJECT + ".svc.id.goog")));
+        service.createNodePool(PROJECT, "us-central1-a", "relays", Map.of("name", "plain", "initialNodeCount", 1,
+                "config", Map.of("workloadMetadataConfig", Map.of("mode", "GCE_METADATA"))));
+
+        service.pollReadiness();
+
+        String wi = service.getNodePool(PROJECT, "us-central1-a", "relays", "default-pool").getNodes().get(0).getName();
+        String plain = service.getNodePool(PROJECT, "us-central1-a", "relays", "plain").getNodes().get(0).getName();
+        verify(clusterManager, org.mockito.Mockito.atLeastOnce()).ensureMetadataRelay(any(),
+                org.mockito.ArgumentMatchers.argThat(n -> wi.equals(n.getName())), org.mockito.ArgumentMatchers.eq(true));
+        verify(clusterManager, org.mockito.Mockito.atLeastOnce()).ensureMetadataRelay(any(),
+                org.mockito.ArgumentMatchers.argThat(n -> plain.equals(n.getName())), org.mockito.ArgumentMatchers.eq(false));
+        assertNotNull(service.getCluster(PROJECT, "us-central1-a", "relays").getMetadataRelayKey());
+    }
+
+    @Test
+    void noRelayRunsWhenTheMetadataServerIsDisabled() {
+        when(metadataServer.enabled()).thenReturn(false);
+        runRealCluster("no-relay", Map.of("initialNodeCount", 1));
+        service.pollReadiness();
+
+        verify(clusterManager, times(1)).startNode(any(), any(), any());
+        verify(clusterManager, never()).ensureMetadataRelay(any(), any(), org.mockito.ArgumentMatchers.anyBoolean());
+    }
+
+    @Test
+    void aNodeRestartedBehindTheEmulatorsBackGetsItsRelayBack() {
+        runRealCluster("watched", Map.of("initialNodeCount", 1));
+        service.pollReadiness();
+        markNodesReady("us-central1-a", "watched");
+        service.pollReadiness();
+        verify(clusterManager, times(1)).ensureMetadataRelay(any(), any(), org.mockito.ArgumentMatchers.anyBoolean());
+
+        when(clusterManager.metadataRelayCurrent(any())).thenReturn(false);
+        service.watchMetadataRelays(PROJECT, "us-central1-a", "watched");
+
+        verify(clusterManager, times(2)).ensureMetadataRelay(any(), any(), org.mockito.ArgumentMatchers.anyBoolean());
     }
 
     @Test
