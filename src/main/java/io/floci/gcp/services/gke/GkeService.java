@@ -611,6 +611,11 @@ public class GkeService {
         return Optional.of(jwks);
     }
 
+    /** Detached copies of every cluster with its node pools. */
+    public List<StoredCluster> allClusters() {
+        return clusterStore.scan(k -> true).stream().filter(c -> c.getName() != null).map(this::withNodePools).toList();
+    }
+
     public List<StoredCluster> listClusters(String project, String location) {
         locations.requireListLocation(location, LocationCatalog.Kind.REGION, LocationCatalog.Kind.ZONE);
         return clusterStore.scan(k -> true).stream()

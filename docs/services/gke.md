@@ -22,6 +22,10 @@ A lightweight mock mode keeps everything metadata-only.
 | `FLOCI_GCP_SERVICES_GKE_DOCKER_NETWORK` | _(none)_ | Overrides `FLOCI_GCP_SERVICES_DOCKER_NETWORK` for GKE/k3s sidecars only |
 | `FLOCI_GCP_SERVICES_GKE_METADATA_SERVER_ENABLED` | `true` | Runs the GKE metadata server on real clusters (see [Workload Identity](#workload-identity-federation-for-gke)) |
 | `FLOCI_GCP_SERVICES_GKE_METADATA_SERVER_RELAY_IMAGE` | `nginx:1.30.6-alpine` | Image of the per-node metadata relay (nginx's stable line, pinned) |
+| `FLOCI_GCP_SERVICES_GKE_LOAD_BALANCER_MODE` | `emulated` | Who serves Services of type LoadBalancer on new clusters: `emulated`, `servicelb` (k3s's own) or `off` (see [LoadBalancer Services](#loadbalancer-services)) |
+| `FLOCI_GCP_SERVICES_GKE_LOAD_BALANCER_PROVISIONING_DELAY` | `0s` | How long an emulated load balancer stays pending before it gets its address |
+| `FLOCI_GCP_SERVICES_GKE_LOAD_BALANCER_PUBLIC_CIDR` | `203.0.113.0/24` | Range of external load balancer addresses (a TEST-NET range, never routed) |
+| `FLOCI_GCP_SERVICES_GKE_LOAD_BALANCER_HOST_PORTS` | `dynamic` | Host ports of load balancer appliances: `dynamic`, `same-as-service` or `none` |
 
 ## Routing: how clients reach GKE
 
@@ -598,6 +602,63 @@ Not emulated: Workload Identity Federation pools and providers other than GKE's,
 resource, deny policies and Principal Access Boundaries, STS and metadata server quotas, IAM propagation
 delay, and the token webhook accepting federated tokens (they authenticate to the cluster's API server like
 any other token not issued for a service account).
+
+## LoadBalancer Services
+
+On GKE a Service of type LoadBalancer gets a regional passthrough Network Load Balancer: external by default,
+internal with `networking.gke.io/load-balancer-type: "Internal"`
+([GKE Service load balancer concepts](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/service-load-balancer)).
+New real clusters run with k3s's servicelb off (`--disable=servicelb`) and floci-gcp acts as GKE's controller
+(`FLOCI_GCP_SERVICES_GKE_LOAD_BALANCER_MODE=emulated`, the default):
+
+- **Which Services.** `type: LoadBalancer` with no `loadBalancerClass`, or one of GKE's classes
+  `networking.gke.io/l4-regional-external`, `networking.gke.io/l4-regional-internal` and
+  `networking.gke.io/l4-regional-external-legacy`. Services of other classes are left alone, as the cloud
+  provider's controller leaves them
+  ([Kubernetes Services](https://kubernetes.io/docs/concepts/services-networking/service/#load-balancer-class)).
+- **Lifecycle.** The controller adds the `service.kubernetes.io/load-balancer-cleanup` finalizer before
+  anything else, records `EnsuringLoadBalancer` and `EnsuredLoadBalancer` events (`Warning`
+  `SyncLoadBalancerFailed` when it cannot serve a Service, which then stays pending) from `service-controller`, as
+  the cloud provider's service controller does, and writes `status.loadBalancer.ingress[0].ip`. Deleting the
+  Service, or changing its type or class, removes the load balancer, its address and the finalizer
+  (`DeletedLoadBalancer`). `FLOCI_GCP_SERVICES_GKE_LOAD_BALANCER_PROVISIONING_DELAY` keeps new ones pending for a
+  while, as GKE takes "a minute" ([Exposing applications](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/exposing-apps)).
+- **External addresses** come from `203.0.113.0/24` (TEST-NET-3, the range GKE's own examples use), unique across
+  all of floci-gcp's clusters, and each is recorded as a Compute Engine regional forwarding rule of the cluster's
+  project, so Compute's external pool never hands it out again (see [Compute](compute.md#forwarding-rules-of-gke-load-balancers)).
+  The rule is named `a<Service UID>` (32 characters) for target-pool load balancers, GKE's default before 1.37
+  or with the `-legacy` class, and `k8s2-<protocol>-<hash>-<namespace>-<name>-<hash>` for backend-service based
+  ones (from 1.37, with `cloud.google.com/l4-rbs: "enabled"` or the external class); the hashes are floci-gcp's,
+  GKE's are not documented. `networking.gke.io/load-balancer-ip-addresses` (an address resource name; it wins)
+  or `spec.loadBalancerIP` asks for a reserved address, which must be in the external range
+  ([Service load balancer parameters](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/service-load-balancer-parameters)).
+- **Internal addresses** come from the lower half of the cluster's Docker network subnet (nodes take the upper
+  half), from its twentieth address; `spec.loadBalancerIP` must be there. GKE takes them from the cluster
+  subnet's primary range; no Compute record is written for them.
+- **Reachability.** One appliance container per Service, from the cluster's own k3s image (no new image), holds
+  the address (on the cluster network for internal ones, on a `floci-gcp-gke-lb-public` network of the
+  external range for external ones) and forwards each port to the Service's node port on the cluster's Ready
+  nodes, spread at random. It runs with `NET_ADMIN` and `net.ipv4.ip_forward=1`, not privileged. Every port is
+  also published on `127.0.0.1` and listed on the Service in the `floci.io/load-balancer-host-ports` annotation
+  (for example `TCP/80=127.0.0.1:41234`).
+
+| From | Internal address | External address |
+|---|---|---|
+| A Pod of the cluster | yes (kube-proxy, and the appliance) | yes (kube-proxy) |
+| A container on the cluster network | yes | only when also on the external network |
+| The host (macOS or Linux) | `127.0.0.1:<host port>` | `127.0.0.1:<host port>` |
+| A Linux Docker host | the address too | the address too |
+
+Clusters stored by an earlier floci-gcp build keep k3s's servicelb (node addresses in `status`) when restored,
+including when their control plane is recreated; `servicelb` mode keeps it on new clusters, and `off` leaves
+Services pending. Mock clusters run nothing.
+
+Not emulated: real public addresses, health checks, client source addresses (the appliance masquerades),
+`externalTrafficPolicy: Local` (every Ready node is a backend), `loadBalancerSourceRanges`,
+`allocateLoadBalancerNodePorts: false` (refused with `SyncLoadBalancerFailed`), IPv6 and dual stack, and GKE's
+`service.kubernetes.io/*` resource-name annotations, backend services, target pools, health checks and firewall
+rules in Compute. A port or node change recreates the appliance on the same address; the forwarding rule keeps the
+ports it was created with.
 
 ## Supported Operations
 

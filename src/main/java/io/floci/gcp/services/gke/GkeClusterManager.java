@@ -965,6 +965,12 @@ public class GkeClusterManager {
 
     private void removeCluster(StoredCluster cluster) {
         removeNodeContainers(cluster, Set.of());
+        Map<String, String> appliances = new HashMap<>(identityFilter(cluster));
+        appliances.put(ROLE_LABEL, ROLE_LOAD_BALANCER);
+        List<Container> found = lifecycleManager.listContainersByLabels("list GKE load balancer appliances", appliances);
+        for (Container appliance : found == null ? List.<Container>of() : found) {
+            lifecycleManager.forceRemove(appliance.getId(), null, true);
+        }
         lifecycleManager.stopAndRemove(cluster.getContainerId(), null, true);
         lifecycleManager.removeVolume(volumeName(cluster));
         if (cluster.getHostPort() > 0) {

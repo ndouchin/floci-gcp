@@ -183,6 +183,16 @@ and session-affinity configuration are validated; actual request routing, health
 checks, TLS certificates, regional load balancing and advanced routeRules are not
 implemented. Endpoint membership is stored separately from the public NEG resource.
 
+### Forwarding rules of GKE load balancers
+
+GKE's emulated LoadBalancer Services record each external address as a regional forwarding rule of the
+cluster's project (`regions/REGION/forwardingRules/NAME`, `loadBalancingScheme: EXTERNAL`, the Service's
+protocol and ports, `description` `{"kubernetes.io/service-name":"NAMESPACE/NAME"}`), so the external pool never
+hands that address to an instance or another rule. A reserved address the Service asks for is claimed like any
+forwarding rule claims it. GKE deletes the rule with the Service; these rules are not created through the
+Compute API, which still only creates global external managed rules. See
+[GKE LoadBalancer Services](gke.md#loadbalancer-services).
+
 ### Address ownership and release
 
 Global external HTTP forwarding rules can share a PREMIUM IPv4 address when
