@@ -34,6 +34,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -66,6 +67,10 @@ public class GkeClusterManager {
     static final String ROLE_LABEL = "io.floci.gke-role";
     static final String ROLE_CONTROL_PLANE = "control-plane";
     static final String ROLE_NODE = "node";
+    static final String ROLE_METADATA_RELAY = "metadata-relay";
+    static final String ROLE_LOAD_BALANCER = "load-balancer";
+    static final String LOAD_BALANCER_MODE_LABEL = "io.floci.load-balancer-mode";
+    private static final String RELAY_SUFFIX = "-metadata";
     static final String NODE_POOL_LABEL = "io.floci.gke-node-pool";
     static final String NODE_LABEL = "io.floci.gke-node";
     private static final String K3S_DATA_DIR = "/var/lib/rancher/k3s";
@@ -174,7 +179,7 @@ public class GkeClusterManager {
     public RestoreOutcome restoreCluster(StoredCluster cluster) {
         Optional<Container> survivor = lifecycleManager.listContainersByLabels("list GKE control plane containers",
                         identityFilter(cluster)).stream()
-                .filter(c -> !ROLE_NODE.equals(labelOf(c, ROLE_LABEL)))
+                .filter(c -> labelOf(c, ROLE_LABEL) == null || ROLE_CONTROL_PLANE.equals(labelOf(c, ROLE_LABEL)))
                 .findFirst();
         if (survivor.isPresent() && ROLE_CONTROL_PLANE.equals(labelOf(survivor.get(), ROLE_LABEL))
                 && cluster.getServerIp() != null) {
@@ -395,21 +400,6 @@ public class GkeClusterManager {
         lifecycleManager.ensureVolume(volumeName);
 
         ensureNetwork(cluster);
-        List<String> serverArgs = new ArrayList<>(List.of(
-                "server", "--disable-agent", "--egress-selector-mode=cluster",
-                "--disable=traefik", "--disable=local-storage",
-                "--tls-san=localhost", "--tls-san=" + containerName,
-                "--kube-apiserver-arg=enable-admission-plugins=ExtendedResourceToleration"));
-        if (cluster.getServerIp() != null) {
-            serverArgs.add("--advertise-address=" + cluster.getServerIp());
-        }
-        if (cluster.getClusterIpv4Cidr() != null && cluster.getServicesIpv4Cidr() != null) {
-            serverArgs.add("--cluster-cidr=" + cluster.getClusterIpv4Cidr());
-            serverArgs.add("--service-cidr=" + cluster.getServicesIpv4Cidr());
-            if (cluster.getNodePodCidrSize() > 0) {
-                serverArgs.add("--kube-controller-manager-arg=node-cidr-mask-size-ipv4=" + cluster.getNodePodCidrSize());
-            }
-        }
 
         // Wire a token-authentication webhook so the bearer token from gke-gcloud-auth-plugin
         // (i.e. `gcloud container clusters get-credentials` + kubectl) is reviewed by floci-gcp
@@ -424,16 +414,15 @@ public class GkeClusterManager {
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "gke", cluster.getName(), cluster.getProject(), cluster.getLocation()))
                 .withLabel(ROLE_LABEL, ROLE_CONTROL_PLANE)
+                .withLabel(LOAD_BALANCER_MODE_LABEL, cluster.getLoadBalancerMode() == null
+                        ? GkeLoadBalancers.MODE_SERVICELB : cluster.getLoadBalancerMode())
                 .withDockerNetwork(config.services().gke().dockerNetwork())
                 .withPrivileged(true)
                 .withLogRotation();
         if (webhookLocalFile != null) {
             specBuilder.withHostDockerInternalOnLinux();
-            serverArgs.add("--kube-apiserver-arg=authentication-token-webhook-config-file=" + WEBHOOK_CONFIG_PATH);
-            serverArgs.add("--kube-apiserver-arg=authentication-token-webhook-version=v1");
-            serverArgs.add("--kube-apiserver-arg=authentication-token-webhook-cache-ttl=30s");
         }
-        ContainerSpec spec = specBuilder.withCmd(serverArgs).build();
+        ContainerSpec spec = specBuilder.withCmd(serverArgs(cluster, containerName, webhookLocalFile != null)).build();
 
         // create -> inject webhook kubeconfig -> start, so the file exists before the API server boots.
         String containerId = lifecycleManager.create(spec);
@@ -461,6 +450,91 @@ public class GkeClusterManager {
 
         LOG.infov("k3s container {0} started for cluster {1} on port {2}",
                 containerId, cluster.getName(), String.valueOf(hostPort));
+    }
+
+    /**
+     * The k3s server's arguments: an agentless control plane on the cluster's Pod and Service ranges, advertising its
+     * fixed address. A server whose cluster records the GKE issuer signs ServiceAccount tokens under
+     * {@code https://container.googleapis.com/v1/projects/P/locations/L/clusters/C}, publishes {@code .../jwks} as its
+     * JWKS URI and makes that URL the default token audience; k3s's own issuer and audiences stay accepted, so
+     * tokens issued before keep working.
+     */
+    static List<String> serverArgs(StoredCluster cluster, String containerName, boolean webhook) {
+        List<String> args = new ArrayList<>(List.of(
+                "server", "--disable-agent", "--egress-selector-mode=cluster",
+                "--disable=traefik", "--disable=local-storage",
+                "--tls-san=localhost", "--tls-san=" + containerName,
+                "--kube-apiserver-arg=enable-admission-plugins=ExtendedResourceToleration"));
+        if (cluster.getServerIp() != null) {
+            args.add("--advertise-address=" + cluster.getServerIp());
+        }
+        if (GkeLoadBalancers.replacesServiceLb(cluster.getLoadBalancerMode())) {
+            args.add("--disable=servicelb");
+        }
+        if (cluster.getClusterIpv4Cidr() != null && cluster.getServicesIpv4Cidr() != null) {
+            args.add("--cluster-cidr=" + cluster.getClusterIpv4Cidr());
+            args.add("--service-cidr=" + cluster.getServicesIpv4Cidr());
+            if (cluster.getNodePodCidrSize() > 0) {
+                args.add("--kube-controller-manager-arg=node-cidr-mask-size-ipv4=" + cluster.getNodePodCidrSize());
+            }
+        }
+        if (cluster.isGkeServiceAccountIssuer()) {
+            String issuer = GkeWorkloadIdentity.issuer(cluster);
+            args.add("--kube-apiserver-arg=service-account-issuer=" + issuer);
+            args.add("--kube-apiserver-arg=service-account-issuer=" + GkeWorkloadIdentity.K3S_ISSUER);
+            args.add("--kube-apiserver-arg=service-account-jwks-uri=" + issuer + "/jwks");
+            args.add("--kube-apiserver-arg=api-audiences=" + issuer + "," + GkeWorkloadIdentity.K3S_ISSUER + ",k3s");
+        }
+        if (webhook) {
+            args.add("--kube-apiserver-arg=authentication-token-webhook-config-file=" + WEBHOOK_CONFIG_PATH);
+            args.add("--kube-apiserver-arg=authentication-token-webhook-version=v1");
+            args.add("--kube-apiserver-arg=authentication-token-webhook-cache-ttl=30s");
+        }
+        return args;
+    }
+
+    /** The JSON Web Key Set the control plane publishes, or null when it cannot be read. */
+    public String readJwks(StoredCluster cluster) {
+        if (cluster.getContainerId() == null) {
+            return null;
+        }
+        ContainerLifecycleManager.ExecResult result = kubectl(cluster, List.of("get", "--raw", "/openid/v1/jwks"));
+        if (result == null || result.exitCode() != 0 || result.stdout() == null || result.stdout().isBlank()) {
+            return null;
+        }
+        return result.stdout().trim();
+    }
+
+    /** How a node container is wired beyond the cluster network: extra hosts, a second network, agent flags. */
+    record NodeNetworking(List<String> extraHosts, String emulatorNetwork, List<String> agentArgs) {
+    }
+
+    /**
+     * Node containers resolve {@code metadata.google.internal} for {@code hostNetwork} pods, and reach floci-gcp the
+     * way the token webhook does: through {@code host.docker.internal} when it runs natively (Linux needs the
+     * host-gateway alias), or on its own Docker network when it runs in a container. A node on two networks keeps
+     * flannel on the cluster network, the first interface it gets.
+     */
+    static NodeNetworking nodeNetworking(boolean inContainer, String emulatorNetwork, boolean linuxHost) {
+        List<String> hosts = new ArrayList<>(List.of(GkeMetadataRelay.METADATA_HOST + ":" + GkeMetadataRelay.METADATA_IP));
+        if (!inContainer && linuxHost) {
+            hosts.add("host.docker.internal:host-gateway");
+        }
+        if (inContainer && emulatorNetwork != null && !emulatorNetwork.isBlank()) {
+            return new NodeNetworking(hosts, emulatorNetwork, List.of("--flannel-iface=eth0"));
+        }
+        return new NodeNetworking(hosts, null, List.of());
+    }
+
+    /** floci-gcp's own Docker network when it runs in a container on one, so other containers there reach a sidecar; else null. */
+    String emulatorNetworkWhenInContainer() {
+        return containerDetector.isRunningInContainer() ? emulatorNetwork() : null;
+    }
+
+    /** The Docker network floci-gcp's sidecars join, as the control plane resolves it; null when there is none. */
+    private String emulatorNetwork() {
+        return containerBuilder.newContainer("floci-gke-network-probe")
+                .withDockerNetwork(config.services().gke().dockerNetwork()).build().networkMode();
     }
 
     /** What a node container is started with, besides its name and the cluster it joins. */
@@ -518,7 +592,10 @@ public class GkeClusterManager {
         lifecycleManager.removeIfExists(containerName, true);
         lifecycleManager.ensureVolume(volumeName);
 
+        NodeNetworking networking = nodeNetworking(containerDetector.isRunningInContainer(), emulatorNetwork(),
+                dockerHostResolver.isLinuxHost());
         List<String> args = new ArrayList<>(List.of("agent", "--node-name=" + node.getName()));
+        args.addAll(networking.agentArgs());
         launch.spec().labels().forEach((k, v) -> args.add("--node-label=" + k + "=" + v));
         launch.spec().taints().forEach(t -> args.add("--node-taint=" + t));
         launch.spec().kubeletArgs().forEach(a -> args.add("--kubelet-arg=" + a));
@@ -538,6 +615,10 @@ public class GkeClusterManager {
                 .withPrivileged(true)
                 .withLogRotation()
                 .withCmd(args);
+        for (String host : networking.extraHosts()) {
+            int colon = host.indexOf(':');
+            builder.withExtraHost(host.substring(0, colon), host.substring(colon + 1));
+        }
         if (launch.spec().memoryBytes() > 0) {
             builder.withMemoryBytes(launch.spec().memoryBytes());
         }
@@ -547,6 +628,9 @@ public class GkeClusterManager {
         ContainerSpec spec = builder.build();
         String containerId = lifecycleManager.create(spec);
         node.setContainerId(containerId);
+        if (networking.emulatorNetwork() != null && !networking.emulatorNetwork().equals(cluster.getNetworkName())) {
+            connect(containerId, networking.emulatorNetwork(), null);
+        }
         lifecycleManager.startCreated(containerId, spec);
         LOG.infov("Started node {0} of GKE cluster {1} ({2})", node.getName(), cluster.getName(), launch.image());
     }
@@ -565,8 +649,11 @@ public class GkeClusterManager {
         }
     }
 
-    /** Removes a node's container and volume. */
+    /** Removes a node's container, its metadata relay and its volume. */
     public void removeNode(StoredNode node) {
+        if (node.getContainerName() != null) {
+            lifecycleManager.removeIfExists(node.getContainerName() + RELAY_SUFFIX, true);
+        }
         String id = node.getContainerId() != null ? node.getContainerId() : node.getContainerName();
         if (id != null) {
             lifecycleManager.forceRemove(id, null, true);
@@ -576,8 +663,19 @@ public class GkeClusterManager {
         }
     }
 
-    /** Removes every node container of the cluster whose container name is not in {@code keep}, with its volume. */
+    /** Removes every node container of the cluster whose container name is not in {@code keep}, with its volume and relay. */
     public void removeNodeContainers(StoredCluster cluster, Set<String> keep) {
+        Map<String, String> relayFilter = new HashMap<>(identityFilter(cluster));
+        relayFilter.put(ROLE_LABEL, ROLE_METADATA_RELAY);
+        List<Container> relays = lifecycleManager.listContainersByLabels("list GKE metadata relays", relayFilter);
+        for (Container relay : relays == null ? List.<Container>of() : relays) {
+            String name = relay.getNames() == null || relay.getNames().length == 0 ? null
+                    : relay.getNames()[0].replaceFirst("^/", "");
+            if (name == null || !name.endsWith(RELAY_SUFFIX)
+                    || !keep.contains(name.substring(0, name.length() - RELAY_SUFFIX.length()))) {
+                lifecycleManager.forceRemove(relay.getId(), null, true);
+            }
+        }
         Map<String, String> filter = new HashMap<>(identityFilter(cluster));
         filter.put(ROLE_LABEL, ROLE_NODE);
         List<Container> containers = lifecycleManager.listContainersByLabels("list GKE node containers", filter);
@@ -596,6 +694,78 @@ public class GkeClusterManager {
             }
             LOG.infov("Removed node container {0} of GKE cluster {1}", name, cluster.getName());
         }
+    }
+
+    /**
+     * Gives a node its GKE metadata server: link-local addresses and routing in its network namespace, and an nginx
+     * relay sharing that namespace that forwards to floci-gcp. A relay that started after its node is kept; one the
+     * node outlived (a node restart leaves it in the old namespace) is recreated.
+     */
+    public void ensureMetadataRelay(StoredCluster cluster, StoredNode node, boolean gkeMetadata) {
+        programMetadataRouting(cluster, node, gkeMetadata);
+        if (metadataRelayCurrent(node)) {
+            return;
+        }
+        String relayName = node.getContainerName() + RELAY_SUFFIX;
+        lifecycleManager.removeIfExists(relayName, true);
+        Map<String, String> labels = new HashMap<>(identityFilter(cluster));
+        labels.put(ROLE_LABEL, ROLE_METADATA_RELAY);
+        labels.put(NODE_LABEL, node.getName());
+        ContainerSpec spec = containerBuilder.newContainer(config.services().gke().metadataServer().relayImage())
+                .withName(relayName)
+                .withLabels(labels)
+                .withNetworkMode("container:" + nodeContainer(node))
+                .withEntrypoint(List.of("nginx"))
+                .withCmd(List.of("-g", "daemon off;"))
+                .withLogRotation()
+                .build();
+        String relayId = lifecycleManager.create(spec);
+        RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), relayId, "/etc/nginx", "nginx.conf",
+                GkeMetadataRelay.nginxConfig(metadataUpstream(cluster, node), cluster.getMetadataRelayKey())
+                        .getBytes(StandardCharsets.UTF_8), 0644);
+        lifecycleManager.startCreated(relayId, spec);
+        LOG.infov("Started the metadata relay of node {0} of GKE cluster {1}", node.getName(), cluster.getName());
+    }
+
+    /** Points a node's pod traffic for {@code 169.254.169.254} at the GKE or the Compute Engine metadata listener. */
+    public void programMetadataRouting(StoredCluster cluster, StoredNode node, boolean gkeMetadata) {
+        ContainerLifecycleManager.ExecResult result = lifecycleManager.exec(nodeContainer(node), List.of(),
+                List.of("sh", "-c", GkeMetadataRelay.nodeScript(cluster.getClusterIpv4Cidr(), gkeMetadata)));
+        if (result == null || result.exitCode() != 0) {
+            throw new IllegalStateException("could not route metadata requests on node " + node.getName() + ": "
+                    + (result == null ? "no result" : result.stderr()));
+        }
+    }
+
+    /** Whether a node's metadata relay runs and started after the node container last did. */
+    public boolean metadataRelayCurrent(StoredNode node) {
+        try {
+            InspectContainerResponse relay = lifecycleManager.runDockerApi("inspect metadata relay",
+                    () -> lifecycleManager.getDockerClient().inspectContainerCmd(node.getContainerName() + RELAY_SUFFIX)
+                            .exec());
+            InspectContainerResponse host = lifecycleManager.runDockerApi("inspect node container",
+                    () -> lifecycleManager.getDockerClient().inspectContainerCmd(nodeContainer(node)).exec());
+            if (!Boolean.TRUE.equals(relay.getState().getRunning()) || !Boolean.TRUE.equals(host.getState().getRunning())) {
+                return false;
+            }
+            return !Instant.parse(relay.getState().getStartedAt()).isBefore(Instant.parse(host.getState().getStartedAt()));
+        } catch (NotFoundException e) {
+            return false;
+        } catch (RuntimeException e) {
+            LOG.debugv("Could not inspect the metadata relay of node {0}: {1}", node.getName(), e.getMessage());
+            return false;
+        }
+    }
+
+    private static String nodeContainer(StoredNode node) {
+        return node.getContainerId() != null ? node.getContainerId() : node.getContainerName();
+    }
+
+    /** floci-gcp's metadata responder for one node, as its relay calls it. */
+    String metadataUpstream(StoredCluster cluster, StoredNode node) {
+        return "http://" + dockerHostResolver.resolve() + ":" + config.port() + "/_floci-gcp/gke/metadata/projects/"
+                + cluster.getProject() + "/locations/" + cluster.getLocation() + "/clusters/" + cluster.getName()
+                + "/nodes/" + node.getName() + "/";
     }
 
     /** Runs kubectl in the control plane container. */
@@ -675,20 +845,35 @@ public class GkeClusterManager {
         kubectl(cluster, args);
     }
 
+    /** Removes labels from a registered node. */
+    public void unlabelNode(StoredCluster cluster, String nodeName, List<String> keys) {
+        if (keys.isEmpty()) {
+            return;
+        }
+        List<String> args = new ArrayList<>(List.of("label", "node", nodeName));
+        keys.forEach(k -> args.add(k + "-"));
+        kubectl(cluster, args);
+    }
+
     /** Attaches the created, not yet started, control plane to the cluster network on its fixed address. */
     private void connectToClusterNetwork(StoredCluster cluster, String containerId) {
         if (cluster.getNetworkName() == null) {
             return;
         }
+        connect(containerId, cluster.getNetworkName(), cluster.getServerIp());
+    }
+
+    /** Attaches a created container to a network, on a fixed address when one is given. */
+    void connect(String containerId, String network, String address) {
         ContainerNetwork endpoint = new ContainerNetwork();
-        if (cluster.getServerIp() != null) {
-            endpoint.withIpamConfig(new ContainerNetwork.Ipam().withIpv4Address(cluster.getServerIp()));
+        if (address != null) {
+            endpoint.withIpamConfig(new ContainerNetwork.Ipam().withIpv4Address(address));
         }
-        lifecycleManager.runDockerApi("connect container " + containerId + " to network " + cluster.getNetworkName(),
+        lifecycleManager.runDockerApi("connect container " + containerId + " to network " + network,
                 () -> {
                     lifecycleManager.getDockerClient().connectToNetworkCmd()
                             .withContainerId(containerId)
-                            .withNetworkId(cluster.getNetworkName())
+                            .withNetworkId(network)
                             .withContainerNetwork(endpoint)
                             .exec();
                     return null;
@@ -752,6 +937,10 @@ public class GkeClusterManager {
             if (caData != null) {
                 cluster.setCaCertificate(caData.trim());
             }
+            String jwks = readJwks(cluster);
+            if (jwks != null) {
+                cluster.setJwks(jwks);
+            }
             LOG.infov("Finalized GKE cluster {0} with CA data extracted", cluster.getName());
         } catch (Exception e) {
             LOG.warnv("Could not extract kubeconfig for cluster {0}: {1}",
@@ -781,6 +970,12 @@ public class GkeClusterManager {
 
     private void removeCluster(StoredCluster cluster) {
         removeNodeContainers(cluster, Set.of());
+        Map<String, String> appliances = new HashMap<>(identityFilter(cluster));
+        appliances.put(ROLE_LABEL, ROLE_LOAD_BALANCER);
+        List<Container> found = lifecycleManager.listContainersByLabels("list GKE load balancer appliances", appliances);
+        for (Container appliance : found == null ? List.<Container>of() : found) {
+            lifecycleManager.forceRemove(appliance.getId(), null, true);
+        }
         lifecycleManager.stopAndRemove(cluster.getContainerId(), null, true);
         lifecycleManager.removeVolume(volumeName(cluster));
         if (cluster.getHostPort() > 0) {
@@ -867,7 +1062,7 @@ public class GkeClusterManager {
         }
     }
 
-    /** Drops the manifests k3s applies at startup (GKE's storage classes) into its data volume. */
+    /** Drops the manifests k3s applies at startup (GKE's storage classes, the metadata server's DNS name) into its data volume. */
     private void copyAutoDeployManifests(String containerId, String clusterName) {
         try {
             RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, K3S_DATA_DIR,
@@ -875,6 +1070,17 @@ public class GkeClusterManager {
         } catch (Exception e) {
             LOG.warnv("GKE cluster {0} starts without its storage classes: could not copy their manifest into the "
                     + "k3s container: {1}", clusterName, e.getMessage());
+        }
+        if (!config.services().gke().metadataServer().enabled()) {
+            return;
+        }
+        try {
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, K3S_DATA_DIR,
+                    GkeMetadataRelay.DNS_MANIFEST_ENTRY, GkeMetadataRelay.dnsManifest().getBytes(StandardCharsets.UTF_8),
+                    0644);
+        } catch (Exception e) {
+            LOG.warnv("Pods of GKE cluster {0} cannot resolve metadata.google.internal: could not copy its DNS "
+                    + "manifest into the k3s container: {1}", clusterName, e.getMessage());
         }
     }
 

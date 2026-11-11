@@ -4,14 +4,17 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @RegisterForReflection
 public class StoredCredentialToken {
 
 	public enum TokenKind {
 		IMPERSONATED,
-		DOWNSCOPED
+		DOWNSCOPED,
+		FEDERATED
 	}
 
 	private String tokenValue;
@@ -20,6 +23,7 @@ public class StoredCredentialToken {
 	private String sourceToken;
 	private String principal;
 	private List<CredentialAccessBoundaryRule> gcsRules = new ArrayList<>();
+	private Map<String, String> attributes = new LinkedHashMap<>();
 
 	public StoredCredentialToken() {
 	}
@@ -80,5 +84,14 @@ public class StoredCredentialToken {
 
 	public void setGcsRules(List<CredentialAccessBoundaryRule> gcsRules) {
 		this.gcsRules = gcsRules == null ? new ArrayList<>() : new ArrayList<>(gcsRules);
+	}
+
+	/** What a federated token's principal was derived from, so its member aliases can be rebuilt. */
+	public Map<String, String> getAttributes() {
+		return attributes;
+	}
+
+	public void setAttributes(Map<String, String> attributes) {
+		this.attributes = attributes == null ? new LinkedHashMap<>() : new LinkedHashMap<>(attributes);
 	}
 }

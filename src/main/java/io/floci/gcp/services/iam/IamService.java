@@ -767,6 +767,12 @@ public class IamService {
      * {@code projects/-/serviceAccounts/{EMAIL_ADDRESS|UNIQUE_ID}} in iam-v1.
      */
     private ServiceAccountRef resolve(String project, String emailOrId) {
+        if (emailOrId != null && !emailOrId.contains("@") && emailOrId.contains(".")) {
+            // An account ID has no dot, so this is neither an email, a unique id nor an account ID: for example the
+            // PROJECT_ID.svc.id.goog GKE's metadata server reports for a Kubernetes ServiceAccount.
+            throw GcpException.invalidArgument("Invalid form of account ID " + emailOrId
+                    + ". Should be [Gaia ID |Email |Unique ID |] of the account");
+        }
         if (!WILDCARD_PROJECT.equals(project)) {
             if (isUniqueId(emailOrId)) {
                 String prefix = "sa:" + project + ":";

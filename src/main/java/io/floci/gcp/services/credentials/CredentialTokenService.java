@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
+import io.floci.gcp.services.iam.WorkloadIdentityPrincipals;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -21,6 +22,7 @@ public class CredentialTokenService {
     public static final String FLOCI_TOKEN_PREFIX = "floci-gcp-";
     public static final String IMPERSONATED_TOKEN_PREFIX = "floci-gcp-impersonated-";
     public static final String DOWNSCOPED_TOKEN_PREFIX = "floci-gcp-downscoped-";
+    public static final String FEDERATED_TOKEN_PREFIX = "floci-gcp-federated-";
     public static final String EXPIRED_TOKEN_MESSAGE = "Expired Floci credential token";
     public static final long DEFAULT_LIFETIME_SECONDS = 3600;
 
@@ -55,6 +57,22 @@ public class CredentialTokenService {
                 null,
                 principal,
                 List.of());
+        tokenStore.put(tokenValue, token);
+        return token;
+    }
+
+    /**
+     * Mints the short-lived federated access token STS issues for a GKE workload: its principal is the workload's
+     * {@code principal://} identifier, and its attributes keep what the other member forms are built from.
+     */
+    public StoredCredentialToken mintFederatedToken(WorkloadIdentityPrincipals.Workload workload, Instant expireTime) {
+        if (expireTime == null || !expireTime.isAfter(clock.instant())) {
+            throw GcpException.invalidArgument("expireTime must be in the future");
+        }
+        String tokenValue = FEDERATED_TOKEN_PREFIX + UUID.randomUUID();
+        StoredCredentialToken token = new StoredCredentialToken(tokenValue, StoredCredentialToken.TokenKind.FEDERATED,
+                expireTime, null, WorkloadIdentityPrincipals.member(workload), List.of());
+        token.setAttributes(workload.attributes());
         tokenStore.put(tokenValue, token);
         return token;
     }
@@ -110,7 +128,8 @@ public class CredentialTokenService {
     private Optional<StoredCredentialToken> lookupBearerToken(String bearerToken, Instant now) {
         if (bearerToken == null || bearerToken.isBlank()
                 || (!bearerToken.startsWith(IMPERSONATED_TOKEN_PREFIX)
-                        && !bearerToken.startsWith(DOWNSCOPED_TOKEN_PREFIX))) {
+                        && !bearerToken.startsWith(DOWNSCOPED_TOKEN_PREFIX)
+                        && !bearerToken.startsWith(FEDERATED_TOKEN_PREFIX))) {
             return Optional.empty();
         }
 

@@ -37,6 +37,11 @@ public class IamServiceAccountAuthorizationAdapter implements IamAuthorizationAd
             "iam.serviceAccounts.signBlob", "iam.serviceAccounts.signJwt",
             "iam.serviceAccounts.get", "iam.serviceAccounts.list");
 
+    /** roles/iam.workloadIdentityUser, "Impersonate service accounts from federated workloads" (IAM roles reference). */
+    private static final Set<String> WORKLOAD_IDENTITY_USER = Set.of(
+            "iam.serviceAccounts.get", "iam.serviceAccounts.getAccessToken", "iam.serviceAccounts.getOpenIdToken",
+            "iam.serviceAccounts.list");
+
     private final Instance<IamService> iamService;
 
     @Inject
@@ -211,7 +216,8 @@ public class IamServiceAccountAuthorizationAdapter implements IamAuthorizationAd
                 "roles/iam.serviceAccountAdmin", withProjectRead(SERVICE_ACCOUNT_ADMIN),
                 "roles/iam.serviceAccountKeyAdmin", withProjectRead(SERVICE_ACCOUNT_KEY_ADMIN),
                 "roles/iam.serviceAccountUser", withProjectRead(SERVICE_ACCOUNT_USER),
-                "roles/iam.serviceAccountTokenCreator", withProjectRead(SERVICE_ACCOUNT_TOKEN_CREATOR));
+                "roles/iam.serviceAccountTokenCreator", withProjectRead(SERVICE_ACCOUNT_TOKEN_CREATOR),
+                "roles/iam.workloadIdentityUser", withProjectRead(WORKLOAD_IDENTITY_USER));
     }
 
     @Override

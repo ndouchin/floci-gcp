@@ -34,8 +34,9 @@ which mode is active and the supported service list.
 | GCS ACLs and GCS gRPC | **Not IAM-enforced.** Existing downscoped-token CAB checks still apply |
 | Cloud Run jobs, worker pools, instances, invocation and operations, all other services | **Not IAM-enforced**, including any policies those services store |
 
-Valid **Floci-issued service-account tokens** activate IAM evaluation on every
-supported surface. Mint one through the existing IAM Credentials
+Valid **Floci-issued service-account tokens** and **federated GKE workload tokens**
+(see [GKE workload identity principals](#gke-workload-identity-principals)) activate IAM
+evaluation on every supported surface. Mint one through the existing IAM Credentials
 `generateAccessToken` endpoint and pass it as `Authorization: Bearer TOKEN` or
 through your SDK credentials provider.
 For plaintext gRPC, Google credentials may refuse an insecure channel before the
@@ -141,6 +142,22 @@ Cloud Logging sink management checks project and organization sink methods over 
 see [sink management IAM](logging.md#sink-management-iam). Cloud Logging GCS sinks authorize fresh object creation as their persisted writer principal,
 including bucket/project policy grants and supported conditions. They do not use the logging
 caller's credentials. See [GCS export](logging.md#gcs-export).
+
+### GKE workload identity principals
+
+STS's Workload Identity Federation for GKE exchange mints `floci-gcp-federated-` tokens. Their principal is
+the workload's `principal://iam.googleapis.com/projects/NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/NAMESPACE/sa/KSA`
+identifier, and allow bindings that name the same workload any other way IAM documents also match it
+([Principal identifiers](https://docs.cloud.google.com/iam/docs/principal-identifiers)):
+`principal://.../kubernetes.serviceaccount.uid/UID`, the legacy
+`serviceAccount:PROJECT_ID.svc.id.goog[NAMESPACE/KSA]`, `principalSet://.../namespace/NAMESPACE` and
+`principalSet://.../kubernetes.cluster/https://container.googleapis.com/v1/projects/PROJECT/locations/LOCATION/clusters/CLUSTER`.
+Every enforcing surface evaluates them like service-account tokens. `roles/iam.workloadIdentityUser`
+("Impersonate service accounts from federated workloads": `iam.serviceAccounts.get`, `getAccessToken`,
+`getOpenIdToken`, `list`, [IAM roles](https://docs.cloud.google.com/iam/docs/roles-permissions/iam)) is in the
+catalog, so a binding on a service account lets the workload call `generateAccessToken` and
+`generateIdToken` for it. Unknown or expired federated tokens are rejected like other Floci-issued tokens.
+Deny policies and Principal Access Boundaries are not emulated for these principals, as for any other.
 
 ### Service-account enforcement
 

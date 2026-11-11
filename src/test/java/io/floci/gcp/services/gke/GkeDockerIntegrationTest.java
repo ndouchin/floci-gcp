@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.Container;
+import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.docker.ContainerLifecycleManager;
 import io.floci.gcp.core.common.docker.ContainerStorageHelper;
 import io.floci.gcp.services.credentials.CredentialTokenService;
@@ -20,12 +21,19 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.api.condition.EnabledIf;
 
+import java.math.BigInteger;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.KeyFactory;
+import java.security.PublicKey;
+import java.security.Signature;
+import java.security.spec.RSAPublicKeySpec;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -88,6 +96,11 @@ class GkeDockerIntegrationTest {
     @Inject
     CredentialTokenService tokens;
 
+    @Inject
+    EmulatorConfig emulatorConfig;
+
+    private static EmulatorConfig config;
+
     private static GkeService service;
     private static ContainerLifecycleManager docker;
 
@@ -103,10 +116,11 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(1)
+    @Order(10)
     void createsAnAgentlessControlPlaneOnThePinnedK3sRelease() {
         service = gkeService;
         docker = lifecycleManager;
+        config = emulatorConfig;
         Response create = given().contentType("application/json").body("""
                 {"cluster": {"name": "%s", "initialClusterVersion": "1.35",
                   "ipAllocationPolicy": {"useIpAliases": true, "clusterIpv4CidrBlock": "10.60.0.0/16"},
@@ -129,7 +143,36 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(2)
+    @Order(15)
+    void signsServiceAccountTokensUnderTheGkeIssuerWithTheKeysGetJsonWebKeysReturns() throws Exception {
+        String issuer = "https://container.googleapis.com/v1/projects/" + PROJECT + "/locations/" + ZONE
+                + "/clusters/" + CLUSTER;
+        JsonNode discovery = JSON.readTree(kubectl("get", "--raw", "/.well-known/openid-configuration"));
+        assertEquals(issuer, discovery.path("issuer").asText());
+        assertEquals(issuer + "/jwks", discovery.path("jwks_uri").asText());
+
+        await("default ServiceAccount", () -> !kubectlOrEmpty("-n", "default", "get", "serviceaccount", "default",
+                "-o", "name").isEmpty());
+        String token = kubectl("create", "token", "default", "-n", "default", "--audience", PROJECT + ".svc.id.goog")
+                .trim();
+        String[] parts = token.split("\\.");
+        JsonNode header = JSON.readTree(Base64.getUrlDecoder().decode(parts[0]));
+        assertEquals(issuer, JSON.readTree(Base64.getUrlDecoder().decode(parts[1])).path("iss").asText());
+
+        List<Map<String, String>> keys = given().get(BASE + "/clusters/" + CLUSTER + "/jwks").path("keys");
+        Map<String, String> key = keys.stream().filter(k -> header.path("kid").asText().equals(k.get("kid")))
+                .findFirst().orElseThrow(() -> new AssertionError("no key " + header + " in " + keys));
+        PublicKey publicKey = KeyFactory.getInstance("RSA").generatePublic(new RSAPublicKeySpec(
+                new BigInteger(1, Base64.getUrlDecoder().decode(key.get("n"))),
+                new BigInteger(1, Base64.getUrlDecoder().decode(key.get("e")))));
+        Signature signature = Signature.getInstance("SHA256withRSA");
+        signature.initVerify(publicKey);
+        signature.update((parts[0] + "." + parts[1]).getBytes(StandardCharsets.US_ASCII));
+        assertTrue(signature.verify(Base64.getUrlDecoder().decode(parts[2])), "the token verifies against GetJSONWebKeys");
+    }
+
+    @Test
+    @Order(20)
     void runsNodePoolsAsGkeNamedNodesSizedFromTheirMachineType() throws Exception {
         awaitPool("default-pool", "RUNNING");
         JsonNode nodes = JSON.readTree(kubectl("get", "nodes", "-o", "json")).path("items");
@@ -159,7 +202,27 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(3)
+    @Order(25)
+    void podsResolveMetadataGoogleInternalToTheMetadataServerAddress() {
+        kubectlApply("""
+                apiVersion: v1
+                kind: Pod
+                metadata: {name: dns-probe, namespace: default}
+                spec:
+                  containers:
+                  - name: probe
+                    image: rancher/mirrored-library-busybox:1.37.0
+                    command: ["sleep", "3600"]
+                """);
+        await("dns-probe Running", () -> "Running".equals(kubectlOrEmpty("get", "pod", "dns-probe", "-o",
+                "jsonpath={.status.phase}")));
+        await("metadata.google.internal resolves", () -> kubectlOrEmpty("exec", "dns-probe", "--", "nslookup",
+                "metadata.google.internal").contains("169.254.169.254"));
+        kubectl("delete", "pod", "dns-probe", "--wait=false");
+    }
+
+    @Test
+    @Order(30)
     void appliesThePodAndServiceRangesAndKeepsMetricsServer() throws Exception {
         Response cluster = given().get(BASE + "/clusters/" + CLUSTER);
         assertEquals("10.60.0.0/16", cluster.path("clusterIpv4Cidr"));
@@ -178,7 +241,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(4)
+    @Order(40)
     void authenticatesBearerTokensThroughTheClustersTokenWebhook() {
         String token = tokens.mintImpersonatedToken("deployer@" + PROJECT + ".iam.gserviceaccount.com",
                 Instant.now().plusSeconds(600)).getTokenValue();
@@ -195,7 +258,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(5)
+    @Order(50)
     void providesGkeStorageClassesAndBindsAVolumeOnTheDefaultOne() throws Exception {
         Map<String, JsonNode> classes = new HashMap<>();
         for (JsonNode sc : JSON.readTree(kubectl("get", "storageclass", "-o", "json")).path("items")) {
@@ -238,7 +301,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(60)
     void resizesPoolsAndAppliesTheirTaints() throws Exception {
         Response resize = given().urlEncodingEnabled(false).contentType("application/json").body("{\"nodeCount\": 2}")
                 .post(BASE + "/clusters/" + CLUSTER + "/nodePools/default-pool:setSize");
@@ -266,7 +329,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(70)
     void gpuPoolsAdvertiseTheirGpusAndCarryGkesGpuTaint() throws Exception {
         Response gpu = given().contentType("application/json").body("""
                 {"nodePool": {"name": "gpu", "initialNodeCount": 1, "config": {
@@ -309,7 +372,98 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(75)
+    void loadBalancerServicesGetAddressesTheEmulatorServesAndReleases() throws Exception {
+        kubectlApply("""
+                apiVersion: apps/v1
+                kind: Deployment
+                metadata: {name: web, namespace: default}
+                spec:
+                  replicas: 1
+                  selector: {matchLabels: {app: web}}
+                  template:
+                    metadata: {labels: {app: web}}
+                    spec:
+                      containers:
+                      - name: httpd
+                        image: rancher/mirrored-library-busybox:1.37.0
+                        command: ["sh", "-c", "mkdir -p /www && echo hello > /www/index.html && httpd -f -p 8080 -h /www"]
+                ---
+                apiVersion: v1
+                kind: Service
+                metadata: {name: web, namespace: default}
+                spec: {type: LoadBalancer, selector: {app: web}, ports: [{port: 80, targetPort: 8080}]}
+                ---
+                apiVersion: v1
+                kind: Service
+                metadata: {name: edge, namespace: default}
+                spec: {type: LoadBalancer, selector: {app: web}, ports: [{port: 8081, targetPort: 8080}]}
+                ---
+                apiVersion: v1
+                kind: Service
+                metadata:
+                  name: web-internal
+                  namespace: default
+                  annotations: {networking.gke.io/load-balancer-type: Internal}
+                spec: {type: LoadBalancer, selector: {app: web}, ports: [{port: 80, targetPort: 8080}]}
+                ---
+                apiVersion: v1
+                kind: Pod
+                metadata: {name: lb-client, namespace: default}
+                spec:
+                  containers:
+                  - name: client
+                    image: rancher/mirrored-library-busybox:1.37.0
+                    command: ["sleep", "3600"]
+                """);
+        await("web has an external address", () -> kubectlOrEmpty("get", "service", "web", "-o",
+                "jsonpath={.status.loadBalancer.ingress[0].ip}").startsWith("203.0.113."));
+        String address = kubectl("get", "service", "web", "-o", "jsonpath={.status.loadBalancer.ingress[0].ip}");
+        String uid = kubectl("get", "service", "web", "-o", "jsonpath={.metadata.uid}");
+        String rule = ("a" + uid.replace("-", "")).substring(0, 32);
+        String rulePath = "/compute/v1/projects/" + PROJECT + "/regions/us-central1/forwardingRules/" + rule;
+        assertEquals(address, given().get(rulePath).then().statusCode(200).extract().path("IPAddress"));
+        assertTrue(kubectl("get", "service", "web", "-o", "jsonpath={.metadata.finalizers}")
+                .contains("service.kubernetes.io/load-balancer-cleanup"));
+        assertTrue(kubectl("get", "events", "--field-selector", "involvedObject.name=web", "-o",
+                "jsonpath={.items[*].reason}").contains("EnsuredLoadBalancer"));
+
+        String hostPorts = kubectl("get", "service", "web", "-o",
+                "jsonpath={.metadata.annotations.floci\\.io/load-balancer-host-ports}");
+        int hostPort = Integer.parseInt(hostPorts.substring(hostPorts.lastIndexOf(':') + 1));
+        await("web answers on its host port", () -> {
+            try {
+                return given().baseUri("http://127.0.0.1").port(hostPort).get("/").asString().contains("hello");
+            } catch (RuntimeException e) {
+                return false;
+            }
+        });
+        await("lb-client Running", () -> "Running".equals(kubectlOrEmpty("get", "pod", "lb-client", "-o",
+                "jsonpath={.status.phase}")));
+        await("a pod reaches the external address", () -> kubectlOrEmpty("exec", "lb-client", "--", "wget", "-qO-",
+                "-T", "5", "http://" + address + "/").contains("hello"));
+
+        await("web-internal has an internal address", () -> !kubectlOrEmpty("get", "service", "web-internal", "-o",
+                "jsonpath={.status.loadBalancer.ingress[0].ip}").isEmpty());
+        String internal = kubectl("get", "service", "web-internal", "-o", "jsonpath={.status.loadBalancer.ingress[0].ip}");
+        assertTrue(GkeMetadataService.inCidr(internal, stored().getNetworkSubnet()), internal);
+        await("a pod reaches the internal address", () -> kubectlOrEmpty("exec", "lb-client", "--", "wget", "-qO-",
+                "-T", "5", "http://" + internal + "/").contains("hello"));
+
+        kubectl("scale", "deployment", "web", "--replicas=2");
+        Thread.sleep(8000);
+        assertEquals(address, kubectl("get", "service", "web", "-o", "jsonpath={.status.loadBalancer.ingress[0].ip}"));
+
+        kubectl("delete", "service", "web", "--wait=true", "--timeout=60s");
+        given().get(rulePath).then().statusCode(404);
+        Map<String, String> filter = new HashMap<>(ContainerStorageHelper.resourceIdentityLabels("gke", CLUSTER, PROJECT, ZONE));
+        filter.put(GkeClusterManager.ROLE_LABEL, GkeClusterManager.ROLE_LOAD_BALANCER);
+        assertEquals(2, docker.listContainersByLabels("list appliances", filter).size(),
+                "edge and web-internal keep their appliances");
+    }
+
+    @Test
+    @Order(80)
     void restoresAStoppedControlPlane() {
         StoredCluster before = stored();
         docker.getDockerClient().stopContainerCmd(before.getContainerId()).withTimeout(5).exec();
@@ -326,7 +480,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(90)
     void upgradesTheControlPlaneOntoTheNextMinorsImage() {
         Response upgrade = given().urlEncodingEnabled(false).contentType("application/json")
                 .body("{\"masterVersion\": \"1.36\"}")
@@ -351,7 +505,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(100)
     void deletingTheClusterRemovesItsContainersVolumesAndNetwork() {
         StoredCluster before = stored();
         List<String> volumes = new ArrayList<>();
@@ -371,6 +525,9 @@ class GkeDockerIntegrationTest {
                 "the volumes of the cluster's containers, anonymous ones included, are gone");
         assertTrue(docker.getDockerClient().listNetworksCmd().withNameFilter(before.getNetworkName()).exec().stream()
                 .noneMatch(n -> before.getNetworkName().equals(n.getName())), "the cluster network is gone");
+        String publicNetwork = ContainerStorageHelper.dockerName(config, "gke-lb-public");
+        await("the load balancer network is gone", () -> docker.getDockerClient().listNetworksCmd()
+                .withNameFilter(publicNetwork).exec().stream().noneMatch(n -> publicNetwork.equals(n.getName())));
         assertFalse(docker.volumeExists(before.getVolumeName()));
     }
 

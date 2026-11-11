@@ -18,38 +18,38 @@ import java.util.Map;
  * Values: {@code instance/zone} is {@code projects/NUMBER/zones/ZONE}, {@code instance/tags} a JSON array, numbers
  * JSON numbers in recursive output. {@code token} and {@code identity} are listed but generated per request.
  */
-final class ComputeMetadataTree {
+public final class ComputeMetadataTree {
     private static final JsonNodeFactory JSON = JsonNodeFactory.instance;
 
-    sealed interface Node permits Dir, Leaf {}
+    public sealed interface Node permits Dir, Leaf {}
 
     /**
      * A directory; {@code rawKeys} keeps user-chosen keys out of the camelCase conversion, and {@code indexed}
      * marks one keyed 0, 1, 2..., which recursive JSON renders as an array (Compute docs, querying metadata:
      * {@code disks/?recursive=true} is {@code [{"deviceName":"boot",...}]}).
      */
-    record Dir(Map<String, Node> children, boolean rawKeys, boolean indexed) implements Node {
-        Dir() { this(new LinkedHashMap<>(), false, false); }
-        static Dir raw() { return new Dir(new LinkedHashMap<>(), true, false); }
+    public record Dir(Map<String, Node> children, boolean rawKeys, boolean indexed) implements Node {
+        public Dir() { this(new LinkedHashMap<>(), false, false); }
+        public static Dir raw() { return new Dir(new LinkedHashMap<>(), true, false); }
         static Dir indexedList() { return new Dir(new LinkedHashMap<>(), false, true); }
-        Dir put(String key, Node node) { children.put(key, node); return this; }
-        Dir put(String key, String text) { return put(key, Leaf.text(text)); }
+        public Dir put(String key, Node node) { children.put(key, node); return this; }
+        public Dir put(String key, String text) { return put(key, Leaf.text(text)); }
     }
 
     /** A value: its plain-text form and its JSON form. A generated leaf is served by the controller instead. */
-    record Leaf(String text, JsonNode json, boolean generated) implements Node {
-        static Leaf text(String value) { return new Leaf(value, JSON.textNode(value), false); }
-        static Leaf number(String value) {
+    public record Leaf(String text, JsonNode json, boolean generated) implements Node {
+        public static Leaf text(String value) { return new Leaf(value, JSON.textNode(value), false); }
+        public static Leaf number(String value) {
             JsonNode json;
             try { json = JSON.numberNode(Long.parseLong(value)); } catch (NumberFormatException e) { json = JSON.textNode(value); }
             return new Leaf(value, json, false);
         }
-        static Leaf list(List<String> values) {
+        public static Leaf list(List<String> values) {
             ArrayNode json = JSON.arrayNode();
             values.forEach(json::add);
             return new Leaf(String.join("\n", values) + (values.isEmpty() ? "" : "\n"), json, false);
         }
-        static Leaf dynamic() { return new Leaf("", JSON.nullNode(), true); }
+        public static Leaf dynamic() { return new Leaf("", JSON.nullNode(), true); }
     }
 
     private ComputeMetadataTree() {}

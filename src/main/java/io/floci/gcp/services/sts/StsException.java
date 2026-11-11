@@ -1,6 +1,6 @@
 package io.floci.gcp.services.sts;
 
-class StsException extends RuntimeException {
+public class StsException extends RuntimeException {
 
 	private final String error;
 
@@ -9,7 +9,7 @@ class StsException extends RuntimeException {
 		this.error = error;
 	}
 
-	String error() {
+	public String error() {
 		return error;
 	}
 }

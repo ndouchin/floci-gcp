@@ -1,6 +1,9 @@
 package io.floci.gcp.services.gke;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.LocationCatalog;
@@ -32,6 +35,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -51,6 +55,7 @@ public class GkeService {
     private static final Logger LOG = Logger.getLogger(GkeService.class);
 
     private static final String DEFAULT_NODE_POOL_NAME = "default-pool";
+    private static final ObjectMapper JSON = new ObjectMapper();
     private static final Pattern VALID_CLUSTER_NAME =
             Pattern.compile("^[a-z](?:[a-z0-9-]{0,38}[a-z0-9])?$");
     /** {@code 1.X} / {@code 1.X.Y}: the two prefix aliases a version field documents. */
@@ -68,7 +73,7 @@ public class GkeService {
     private static final List<String> TYPED_CLUSTER_FIELDS = List.of(
             "name", "description", "initialClusterVersion", "network", "subnetwork",
             "clusterIpv4Cidr", "locations", "resourceLabels", "loggingService", "monitoringService",
-            "nodePools", "initialNodeCount", "nodeConfig");
+            "nodePools", "initialNodeCount", "nodeConfig", "workloadIdentityConfig", "id");
 
     private final StorageBackend<String, StoredCluster> clusterStore;
     private final StorageBackend<String, StoredNodePool> nodePoolStore;
@@ -93,6 +98,9 @@ public class GkeService {
     private final SecureRandom random = new SecureRandom();
     /** Create operations whose cluster has an unreadable {@code createTime}, already logged once. */
     private final Set<String> unreadableCreateTimes = ConcurrentHashMap.newKeySet();
+    /** When each cluster's metadata relays were last set up or checked. */
+    private final Map<String, Instant> relayWatches = new ConcurrentHashMap<>();
+    static final Duration RELAY_WATCH_INTERVAL = Duration.ofSeconds(15);
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "gke-readiness-poller");
         t.setDaemon(true);
@@ -157,6 +165,7 @@ public class GkeService {
     @PostConstruct
     public void init() {
         migrateEmbeddedNodePools();
+        backfillTypedClusterFields();
         refreshPersistedNodeVersionAggregates();
         if (!mock()) {
             poller.schedule(this::restoreRuntime, 1, TimeUnit.SECONDS);
@@ -307,6 +316,36 @@ public class GkeService {
         }
     }
 
+    /** Clusters stored before {@code id} and the workload pool were typed: an id, and the pool echoed from {@code extraConfig}. */
+    private void backfillTypedClusterFields() {
+        for (StoredCluster cluster : clusterStore.scan(k -> true)) {
+            if (cluster.getName() == null || cluster.getProject() == null || cluster.getLocation() == null) {
+                continue;
+            }
+            boolean changed = false;
+            if (cluster.getId() == null) {
+                cluster.setId(newClusterId());
+                changed = true;
+            }
+            if (cluster.getMetadataRelayKey() == null) {
+                cluster.setMetadataRelayKey(newClusterId());
+                changed = true;
+            }
+            if (cluster.getExtraConfig() != null && cluster.getExtraConfig().containsKey("workloadIdentityConfig")) {
+                Object echoed = cluster.getExtraConfig().get("workloadIdentityConfig");
+                if (cluster.getWorkloadPool() == null && echoed instanceof Map<?, ?> m
+                        && m.get("workloadPool") instanceof String pool && !pool.isBlank()) {
+                    cluster.setWorkloadPool(pool);
+                }
+                putExtraConfig(cluster, "workloadIdentityConfig", null);
+                changed = true;
+            }
+            if (changed) {
+                clusterStore.put(clusterKey(cluster.getProject(), cluster.getLocation(), cluster.getName()), cluster);
+            }
+        }
+    }
+
     @PreDestroy
     public void shutdown() {
         poller.shutdownNow();
@@ -346,11 +385,18 @@ public class GkeService {
         String masterVersion = requestedVersion == null ? GkeReleases.defaultRelease(channel).gkeVersion()
                 : resolveVersion("initialClusterVersion", requestedVersion, "Master", channel);
         validateNodePoolVersions(clusterMap.get("nodePools"), masterVersion, channel);
+        String workloadPool = workloadPool(project, clusterMap.get("workloadIdentityConfig"));
+        if (workloadPool == null && clusterMap.get("autopilot") instanceof Map<?, ?> autopilot
+                && Boolean.TRUE.equals(autopilot.get("enabled"))) {
+            workloadPool = projectWorkloadPool(project);
+        }
+        validateWorkloadMetadata(clusterMap, workloadPool);
         String network = stringField(clusterMap, "network", "default");
         GkeNetworking.Ranges ranges = GkeNetworking.resolve(clusterMap, defaultMaxPods(clusterMap),
                 takenRanges(project, network));
 
         StoredCluster cluster = new StoredCluster();
+        cluster.setId(newClusterId());
         cluster.setName(name);
         cluster.setProject(project);
         cluster.setLocation(location);
@@ -379,6 +425,10 @@ public class GkeService {
         cluster.setSelfLink(clusterSelfLink(project, location, name));
         cluster.setEtag(newFingerprint());
         cluster.setExtraConfig(extraFields(clusterMap, TYPED_CLUSTER_FIELDS));
+        cluster.setWorkloadPool(workloadPool);
+        cluster.setGkeServiceAccountIssuer(true);
+        cluster.setMetadataRelayKey(newClusterId());
+        cluster.setLoadBalancerMode(config.services().gke().loadBalancer().mode());
         if (!ranges.routesBased()) {
             putExtraConfig(cluster, "ipAllocationPolicy", vpcNativePolicy(clusterMap.get("ipAllocationPolicy"), ranges));
         }
@@ -457,6 +507,70 @@ public class GkeService {
         return taken;
     }
 
+    /**
+     * {@code workloadIdentityConfig.workloadPool}, or the deprecated v1beta1 {@code identityNamespace}, of a create or
+     * update. "Currently, the only accepted workload pool is the workload pool of the Cloud project containing the
+     * cluster" ({@code gcloud container clusters create --workload-pool}); an empty pool disables Workload Identity,
+     * which is how Terraform disables it. Null when disabled.
+     */
+    static String workloadPool(String project, Object config) {
+        if (config == null) {
+            return null;
+        }
+        if (!(config instanceof Map<?, ?> map)) {
+            throw GcpException.invalidArgument("workloadIdentityConfig must be an object");
+        }
+        Object value = map.get("workloadPool") != null ? map.get("workloadPool") : map.get("identityNamespace");
+        if (value == null || "".equals(value)) {
+            return null;
+        }
+        if (!(value instanceof String pool)) {
+            throw GcpException.invalidArgument("workloadIdentityConfig.workloadPool must be a string");
+        }
+        String accepted = projectWorkloadPool(project);
+        if (!accepted.equals(pool)) {
+            throw GcpException.invalidArgument("Invalid workload pool \"" + pool + "\": the only accepted workload pool is \""
+                    + accepted + "\", the workload pool of the cluster's project.");
+        }
+        return pool;
+    }
+
+    /** Every create-time pool's {@code workloadMetadataConfig}, checked before anything is stored. */
+    private static void validateWorkloadMetadata(Map<String, Object> clusterMap, String workloadPool) {
+        if (clusterMap.get("nodePools") instanceof List<?> pools && !pools.isEmpty()) {
+            for (Object pool : pools) {
+                if (pool instanceof Map<?, ?> poolMap) {
+                    requireWorkloadMetadataMode(asMap(poolMap.get("config")), workloadPool);
+                }
+            }
+            return;
+        }
+        requireWorkloadMetadataMode(asMap(clusterMap.get("nodeConfig")), workloadPool);
+    }
+
+    /** {@code GKE_METADATA} "can only be enabled if Workload Identity is enabled at the cluster level" (cluster_service.proto). */
+    private static void requireWorkloadMetadataMode(Map<String, Object> config, String workloadPool) {
+        if (GkeNodes.GKE_METADATA.equals(GkeNodes.metadataMode(config)) && workloadPool == null) {
+            throw GcpException.invalidArgument("Workload metadata mode GKE_METADATA requires Workload Identity "
+                    + "Federation for GKE to be enabled on the cluster (workloadIdentityConfig.workloadPool).");
+        }
+    }
+
+    /** Whether a pool's nodes run the GKE metadata server: its mode says so and the cluster still has a workload pool. */
+    static boolean runsGkeMetadataServer(StoredCluster cluster, StoredNodePool pool) {
+        return cluster.getWorkloadPool() != null && GkeNodes.GKE_METADATA.equals(GkeNodes.metadataMode(pool.getConfig()));
+    }
+
+    static String projectWorkloadPool(String project) {
+        return project + ".svc.id.goog";
+    }
+
+    private String newClusterId() {
+        byte[] bytes = new byte[32];
+        random.nextBytes(bytes);
+        return HexFormat.of().formatHex(bytes);
+    }
+
     private static Map<String, Object> operationError(Status.Code code, String message) {
         return Map.of("code", code.value(), "message", message);
     }
@@ -469,6 +583,37 @@ public class GkeService {
         StoredCluster stored = clusterStore.get(clusterKey(project, location, clusterId))
                 .orElseThrow(() -> GcpException.notFound("Not found: cluster " + clusterId));
         return withNodePools(stored);
+    }
+
+    /** A detached copy of a cluster, or empty when it does not exist. */
+    public Optional<StoredCluster> findCluster(String project, String location, String clusterId) {
+        return clusterStore.get(clusterKey(project, location, clusterId)).map(StoredCluster::new);
+    }
+
+    /** Reads a running cluster's JSON Web Key Set from its API server again and records it. */
+    public Optional<String> refreshJwks(String project, String location, String clusterId) {
+        String key = clusterKey(project, location, clusterId);
+        StoredCluster seen = clusterStore.get(key).map(StoredCluster::new).orElse(null);
+        if (mock() || seen == null || !"RUNNING".equals(seen.getStatus())) {
+            return Optional.empty();
+        }
+        String jwks = clusterManager.readJwks(seen);
+        if (jwks == null) {
+            return Optional.empty();
+        }
+        synchronized (lifecycleLock) {
+            clusterStore.get(key).filter(current -> Objects.equals(current.getContainerId(), seen.getContainerId()))
+                    .ifPresent(current -> {
+                        current.setJwks(jwks);
+                        clusterStore.put(key, current);
+                    });
+        }
+        return Optional.of(jwks);
+    }
+
+    /** Detached copies of every cluster with its node pools. */
+    public List<StoredCluster> allClusters() {
+        return clusterStore.scan(k -> true).stream().filter(c -> c.getName() != null).map(this::withNodePools).toList();
     }
 
     public List<StoredCluster> listClusters(String project, String location) {
@@ -493,6 +638,11 @@ public class GkeService {
         // cluster rather than one whose containers are gone.
         synchronized (clusterLock(key)) {
             if (!mock()) {
+                synchronized (lifecycleLock) {
+                    // STOPPING, as GKE reports a cluster being deleted, tells the load balancer controller to leave it.
+                    cluster.setStatus("STOPPING");
+                    clusterStore.put(key, cluster);
+                }
                 clusterManager.deleteCluster(cluster);
             }
             for (StoredNodePool pool : listNodePools(project, location, clusterId)) {
@@ -529,6 +679,9 @@ public class GkeService {
             String desiredMasterVersion = optionalStringField(updateMap, "desiredMasterVersion");
             String desiredLoggingService = optionalStringField(updateMap, "desiredLoggingService");
             String desiredMonitoringService = optionalStringField(updateMap, "desiredMonitoringService");
+            boolean workloadIdentityUpdate = updateMap.containsKey("desiredWorkloadIdentityConfig");
+            String desiredWorkloadPool = workloadIdentityUpdate
+                    ? workloadPool(project, updateMap.get("desiredWorkloadIdentityConfig")) : null;
             List<StoredNodePool> targets = desiredNodeVersion == null ? List.of()
                     : nodeVersionUpdateTargets(project, location, clusterId, updateMap);
             String nodeVersion = desiredNodeVersion == null ? null
@@ -540,6 +693,11 @@ public class GkeService {
             if (masterVersion != null) {
                 checkMasterUpgrade(cluster.getCurrentMasterVersion(), masterVersion);
                 requireReplaceableControlPlane(cluster, masterVersion);
+            }
+            boolean moveToGkeIssuer = desiredWorkloadPool != null && !mock() && !cluster.isGkeServiceAccountIssuer();
+            if (moveToGkeIssuer && !"RUNNING".equals(cluster.getStatus())) {
+                throw GcpException.failedPrecondition("Cluster " + cluster.getName() + " is " + cluster.getStatus()
+                        + "; Workload Identity can only be enabled while it is RUNNING.");
             }
             if (nodeVersion != null) {
                 // The pool carries its own `version`, and GetNodePool/ListNodePools read it from
@@ -569,6 +727,17 @@ public class GkeService {
             if (desiredMonitoringService != null) {
                 cluster.setMonitoringService(desiredMonitoringService);
             }
+            if (workloadIdentityUpdate && !Objects.equals(cluster.getWorkloadPool(), desiredWorkloadPool)) {
+                Map<String, Boolean> before = new HashMap<>();
+                List<StoredNodePool> pools = listNodePools(project, location, clusterId);
+                pools.forEach(pool -> before.put(pool.getName(), runsGkeMetadataServer(cluster, pool)));
+                cluster.setWorkloadPool(desiredWorkloadPool);
+                for (StoredNodePool pool : pools) {
+                    if (before.get(pool.getName()) != runsGkeMetadataServer(cluster, pool)) {
+                        applyMetadataMode(cluster, pool);
+                    }
+                }
+            }
 
             Map<String, Object> stripped = stripPrefix(updateMap, "desired");
             // Already applied above to their typed field — drop so they aren't also duplicated,
@@ -579,7 +748,15 @@ public class GkeService {
             stripped.remove("locations");
             stripped.remove("loggingService");
             stripped.remove("monitoringService");
+            stripped.remove("workloadIdentityConfig");
             mergeExtraConfig(cluster, stripped);
+            if (moveToGkeIssuer) {
+                // A server started by an earlier build signs tokens under k3s's issuer, which STS cannot federate.
+                cluster.setGkeServiceAccountIssuer(true);
+                if (upgrade == null) {
+                    upgrade = recreateControlPlane(project, location, clusterId, cluster, OperationType.UPDATE_CLUSTER);
+                }
+            }
         }
         touch(cluster);
         clusterStore.put(clusterKey(project, location, clusterId), cluster);
@@ -643,6 +820,13 @@ public class GkeService {
         if (!replace) {
             return null;
         }
+        return recreateControlPlane(project, location, clusterId, cluster, type);
+    }
+
+    /** Recreates the control plane container on its volume with the cluster's current settings, as
+     * {@link #moveControlPlane} does for a new image. */
+    private StoredOperation recreateControlPlane(String project, String location, String clusterId,
+                                                 StoredCluster cluster, OperationType type) {
         touch(cluster);
         StoredOperation op = operationService.createRunningOperation(project, location, clusterId, type);
         String key = clusterKey(project, location, clusterId);
@@ -825,14 +1009,49 @@ public class GkeService {
         return config;
     }
 
-    /** {@code GetJSONWebKeys} — floci-gcp does not issue real, independently-verifiable
-     * workload-identity tokens (any bearer token is accepted, per the emulator's auth-bypass
-     * model), so there is no real signing key to expose. Returns an empty key set rather than a
-     * fabricated key, since a fabricated key would misleadingly imply real token verification is
-     * possible against it. */
+    /** {@code GetJSONWebKeys}: the keys the cluster's API server signs ServiceAccount tokens with, as it publishes
+     * them at {@code /openid/v1/jwks}, in the {@code Jwk} fields of cluster_service.proto. Empty for a mock cluster
+     * and for one whose API server has not been ready yet. */
     public Map<String, Object> getJsonWebKeys(String project, String location, String clusterId) {
-        requireCluster(project, location, clusterId);
-        return Map.of("keys", List.of());
+        StoredCluster cluster = requireCluster(project, location, clusterId);
+        return Map.of("keys", jsonWebKeys(cluster.getJwks()));
+    }
+
+    private static final List<String> JWK_FIELDS = List.of("kty", "alg", "use", "kid", "n", "e", "x", "y", "crv");
+
+    static List<Map<String, Object>> jsonWebKeys(String jwks) {
+        if (jwks == null || jwks.isBlank()) {
+            return List.of();
+        }
+        List<Map<String, Object>> keys = new ArrayList<>();
+        try {
+            for (JsonNode key : JSON.readTree(jwks).path("keys")) {
+                Map<String, Object> jwk = new LinkedHashMap<>();
+                for (String field : JWK_FIELDS) {
+                    if (key.hasNonNull(field)) {
+                        jwk.put(field, key.get(field).asText());
+                    }
+                }
+                keys.add(jwk);
+            }
+        } catch (JsonProcessingException e) {
+            LOG.warnv("Ignoring an unreadable JSON Web Key Set: {0}", e.getMessage());
+            return List.of();
+        }
+        return keys;
+    }
+
+    /** {@code GetOpenIDConfig}: the discovery document of the cluster's issuer, which its API server also serves. */
+    public Map<String, Object> getOpenIdConfiguration(String project, String location, String clusterId) {
+        StoredCluster cluster = requireCluster(project, location, clusterId);
+        String issuer = GkeWorkloadIdentity.issuer(cluster);
+        Map<String, Object> document = new LinkedHashMap<>();
+        document.put("issuer", issuer);
+        document.put("jwks_uri", issuer + "/jwks");
+        document.put("response_types_supported", List.of("id_token"));
+        document.put("subject_types_supported", List.of("public"));
+        document.put("id_token_signing_alg_values_supported", List.of("RS256"));
+        return document;
     }
 
     /** {@code ListUsableSubnetworks} — floci-gcp does not emulate Compute Engine/VPC, so there is
@@ -924,6 +1143,32 @@ public class GkeService {
         return op;
     }
 
+    /**
+     * Brings a pool's running nodes to its metadata mode in place, as GKE applies a {@code workloadMetadataConfig}
+     * change to a pool "immediately": the GKE metadata server label goes on or off. Nodes are not recreated.
+     */
+    private void applyMetadataMode(StoredCluster cluster, StoredNodePool pool) {
+        if (mock() || !"RUNNING".equals(cluster.getStatus()) || pool.getNodes() == null) {
+            return;
+        }
+        boolean gkeMetadata = runsGkeMetadataServer(cluster, pool);
+        for (StoredNode node : pool.getNodes()) {
+            try {
+                if (metadataServerEnabled()) {
+                    clusterManager.programMetadataRouting(cluster, node, gkeMetadata);
+                }
+                if (gkeMetadata) {
+                    clusterManager.labelNode(cluster, node.getName(), Map.of(GkeNodes.GKE_METADATA_SERVER_LABEL, "true"));
+                } else {
+                    clusterManager.unlabelNode(cluster, node.getName(), List.of(GkeNodes.GKE_METADATA_SERVER_LABEL));
+                }
+            } catch (Exception e) {
+                LOG.warnv("Could not apply the metadata mode of node pool {0} to node {1}: {2}", pool.getName(),
+                        node.getName(), e.getMessage());
+            }
+        }
+    }
+
     /** {@code SetLocations} and {@code desiredLocations} move every node pool to the cluster's new node locations. */
     private void moveNodeLocations(String project, String location, String clusterId, StoredCluster cluster) {
         for (StoredNodePool pool : listNodePools(project, location, clusterId)) {
@@ -996,6 +1241,14 @@ public class GkeService {
         StoredNodePool pool = requireNodePool(project, location, clusterId, nodePoolId);
         boolean newImage = false;
         if (body != null) {
+            Map<String, Object> metadataUpdate = null;
+            if (body.get("workloadMetadataConfig") != null) {
+                metadataUpdate = asMap(body.get("workloadMetadataConfig"));
+                if (metadataUpdate == null) {
+                    throw GcpException.invalidArgument("workloadMetadataConfig must be an object");
+                }
+                requireWorkloadMetadataMode(Map.of("workloadMetadataConfig", metadataUpdate), cluster.getWorkloadPool());
+            }
             String nodeVersion = optionalStringField(body, "nodeVersion");
             if (nodeVersion != null) {
                 String resolved = resolveNodeVersion("nodeVersion", nodeVersion, cluster);
@@ -1004,6 +1257,15 @@ public class GkeService {
             }
             if (body.get("upgradeSettings") != null) {
                 pool.setUpgradeSettings(asMap(body.get("upgradeSettings")));
+            }
+            if (metadataUpdate != null) {
+                boolean before = runsGkeMetadataServer(cluster, pool);
+                Map<String, Object> config = pool.getConfig() == null ? new HashMap<>() : new HashMap<>(pool.getConfig());
+                config.put("workloadMetadataConfig", metadataUpdate);
+                pool.setConfig(config);
+                if (before != runsGkeMetadataServer(cluster, pool)) {
+                    applyMetadataMode(cluster, pool);
+                }
             }
         }
         pool.setEtag(newFingerprint());
@@ -1189,6 +1451,14 @@ public class GkeService {
         pool.setMaxPodsConstraint(asMap(poolMap.get("maxPodsConstraint")));
         pool.setConditions(List.of());
         pool.setConfig(asMap(poolMap.get("config")));
+        String clusterWorkloadPool = clusterStore.get(clusterKey(project, location, clusterId))
+                .map(StoredCluster::getWorkloadPool).orElse(null);
+        requireWorkloadMetadataMode(pool.getConfig(), clusterWorkloadPool);
+        if (clusterWorkloadPool != null && GkeNodes.metadataMode(pool.getConfig()) == null) {
+            Map<String, Object> config = pool.getConfig() == null ? new HashMap<>() : pool.getConfig();
+            config.put("workloadMetadataConfig", Map.of("mode", GkeNodes.GKE_METADATA));
+            pool.setConfig(config);
+        }
         pool.setGpuTaint(GkeNodes.hasGpus(pool.getConfig()) && listNodePools(project, location, clusterId).stream()
                 .anyMatch(other -> !GkeNodes.hasGpus(other.getConfig())));
         pool.setAutoscaling(asMap(poolMap.get("autoscaling")));
@@ -1421,6 +1691,10 @@ public class GkeService {
                 } catch (Exception e) {
                     LOG.errorv(e, "Error reconciling the nodes of GKE cluster {0}", cluster.getName());
                 }
+                Instant watched = relayWatches.get(clusterKey(cluster.getProject(), cluster.getLocation(), cluster.getName()));
+                if (metadataServerEnabled() && (watched == null || watched.plus(RELAY_WATCH_INTERVAL).isBefore(Instant.now()))) {
+                    watchMetadataRelays(cluster.getProject(), cluster.getLocation(), cluster.getName());
+                }
             }
         }
     }
@@ -1555,6 +1829,7 @@ public class GkeService {
         removeNodes(cluster, dropped);
         boolean changed = !dropped.isEmpty();
         pool.setNodes(new ArrayList<>(kept));
+        kept.forEach(node -> ensureMetadataRelay(cluster, pool, node));
         GkeClusterManager.HostResources host = clusterManager.hostResources();
         for (Map.Entry<String, Integer> slot : wanted.entrySet()) {
             for (int i = 0; i < slot.getValue(); i++) {
@@ -1563,7 +1838,8 @@ public class GkeService {
                 StoredNode node = new StoredNode(GkeNodes.nodeName(cluster.getName(), pool.getName(), hash,
                         uniqueSuffix(pool)), zone);
                 GkeNodes.NodeSpec spec = GkeNodes.spec(cluster.getProject(), pool.getName(), zone, node.getName(),
-                        pool.getConfig(), maxPods(cluster, pool), pool.isGpuTaint(), host.cpus(), host.memoryBytes());
+                        pool.getConfig(), maxPods(cluster, pool), pool.isGpuTaint(), host.cpus(), host.memoryBytes(),
+                        runsGkeMetadataServer(cluster, pool));
                 pool.getNodes().add(node);
                 try {
                     clusterManager.startNode(cluster, node, new GkeClusterManager.NodeLaunch(pool.getName(), image, spec));
@@ -1573,6 +1849,7 @@ public class GkeService {
                     failPool(cluster, pool, "Could not start node " + node.getName() + ": " + e.getMessage());
                     return;
                 }
+                ensureMetadataRelay(cluster, pool, node);
                 changed = true;
                 nodePoolStore.put(poolKey, pool);
             }
@@ -1581,6 +1858,55 @@ public class GkeService {
             pool.setStatus("RECONCILING");
         }
         nodePoolStore.put(poolKey, pool);
+    }
+
+    private boolean metadataServerEnabled() {
+        return config.services().gke().metadataServer().enabled();
+    }
+
+    /** Gives a node its metadata relay and routing; a failure leaves the node running without the metadata server. */
+    private void ensureMetadataRelay(StoredCluster cluster, StoredNodePool pool, StoredNode node) {
+        if (!metadataServerEnabled()) {
+            return;
+        }
+        try {
+            clusterManager.ensureMetadataRelay(cluster, node, runsGkeMetadataServer(cluster, pool));
+        } catch (Exception e) {
+            LOG.warnv("Node {0} of GKE cluster {1} runs without a metadata server: {2}", node.getName(),
+                    cluster.getName(), e.getMessage());
+        }
+        relayWatches.put(clusterKey(cluster.getProject(), cluster.getLocation(), cluster.getName()), Instant.now());
+    }
+
+    /**
+     * Brings back the metadata relay of a node whose container restarted since its relay started (a restarted
+     * container gets a new network namespace, which the old relay does not follow), and puts each node's metadata
+     * routing first again.
+     */
+    void watchMetadataRelays(String project, String location, String clusterId) {
+        String key = clusterKey(project, location, clusterId);
+        relayWatches.put(key, Instant.now());
+        synchronized (clusterLock(key)) {
+            StoredCluster cluster = clusterStore.get(key).orElse(null);
+            if (cluster == null || !"RUNNING".equals(cluster.getStatus()) || cluster.isNodesOutOfDate()) {
+                return;
+            }
+            for (StoredNodePool pool : listNodePools(project, location, clusterId)) {
+                for (StoredNode node : pool.getNodes() == null ? List.<StoredNode>of() : pool.getNodes()) {
+                    try {
+                        if (clusterManager.metadataRelayCurrent(node)) {
+                            clusterManager.programMetadataRouting(cluster, node, runsGkeMetadataServer(cluster, pool));
+                        } else {
+                            LOG.infov("The metadata relay of node {0} of GKE cluster {1} is gone or stale; recreating it",
+                                    node.getName(), clusterId);
+                            clusterManager.ensureMetadataRelay(cluster, node, runsGkeMetadataServer(cluster, pool));
+                        }
+                    } catch (Exception e) {
+                        LOG.debugv("Could not check the metadata relay of node {0}: {1}", node.getName(), e.getMessage());
+                    }
+                }
+            }
+        }
     }
 
     private String uniqueSuffix(StoredNodePool pool) {
@@ -1683,7 +2009,8 @@ public class GkeService {
                 continue;
             }
             GkeNodes.NodeSpec spec = GkeNodes.spec(cluster.getProject(), pool.getName(), node.getZone(),
-                    node.getName(), pool.getConfig(), maxPods(cluster, pool), pool.isGpuTaint(), 0, 0);
+                    node.getName(), pool.getConfig(), maxPods(cluster, pool), pool.isGpuTaint(), 0, 0,
+                    runsGkeMetadataServer(cluster, pool));
             Map<String, String> drifted = new HashMap<>();
             spec.labels().forEach((k, v) -> {
                 if (!v.equals(state.labels().get(k))) {
@@ -1710,15 +2037,15 @@ public class GkeService {
         if (clusterManager.isReady(probe)) {
             clusterManager.finalizeCluster(probe);
             if (probe.getCaCertificate() != null && !probe.getCaCertificate().isBlank()) {
-                settle(seen, probe.getCaCertificate(), null);
+                settle(seen, probe.getCaCertificate(), probe.getJwks(), null);
                 return;
             }
         } else if (clusterManager.isControlPlaneStopped(probe)) {
-            settle(seen, null, "The control plane of cluster " + seen.getName() + " stopped before it became ready");
+            settle(seen, null, null, "The control plane of cluster " + seen.getName() + " stopped before it became ready");
             return;
         }
         if (startupExpired(seen)) {
-            settle(seen, null, "The control plane of cluster " + seen.getName() + " did not become ready within "
+            settle(seen, null, null, "The control plane of cluster " + seen.getName() + " did not become ready within "
                     + STARTUP_TIMEOUT.toMinutes() + " minutes");
         }
     }
@@ -1726,7 +2053,7 @@ public class GkeService {
     /** Moves a still-provisioning or reconciling cluster to {@code RUNNING} (with its CA) or, given a
      * failure, to {@code ERROR}, and finishes the create operation recorded on it. A pass whose cluster
      * was deleted, recreated or settled meanwhile writes nothing. */
-    private void settle(StoredCluster seen, String caCertificate, String failure) {
+    private void settle(StoredCluster seen, String caCertificate, String jwks, String failure) {
         String key = clusterKey(seen.getProject(), seen.getLocation(), seen.getName());
         synchronized (lifecycleLock) {
             Optional<StoredCluster> current = clusterStore.get(key);
@@ -1739,6 +2066,9 @@ public class GkeService {
             StoredCluster cluster = current.get();
             if (failure == null) {
                 cluster.setCaCertificate(caCertificate);
+                if (jwks != null) {
+                    cluster.setJwks(jwks);
+                }
                 cluster.setStatus("RUNNING");
                 cluster.setStatusMessage(null);
             } else {

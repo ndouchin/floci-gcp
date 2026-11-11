@@ -64,6 +64,10 @@ public class StoredCluster {
     private String etag;
     private List<Map<String, Object>> conditions;
     private Map<String, Object> extraConfig;
+    /** {@code Cluster.id}, output only. */
+    private String id;
+    /** {@code workloadIdentityConfig.workloadPool}; null when Workload Identity is disabled. */
+    private String workloadPool;
 
     // Emulator-internal (real mode only)
     private String containerId;
@@ -84,6 +88,14 @@ public class StoredCluster {
     private String serverIp;
     /** Whether the node pools' agents must be brought in line with the pools' specs. */
     private boolean nodesOutOfDate;
+    /** Whether the control plane issues ServiceAccount tokens under GKE's issuer URL; false for servers of earlier builds. */
+    private boolean gkeServiceAccountIssuer;
+    /** The JSON Web Key Set the control plane publishes at {@code /openid/v1/jwks}, read once it is ready. */
+    private String jwks;
+    /** The secret the cluster's metadata relays present to floci-gcp's metadata responder. */
+    private String metadataRelayKey;
+    /** Who serves LoadBalancer Services: {@code emulated}, {@code servicelb} or {@code off}; null (k3s's servicelb) for clusters of earlier builds. */
+    private String loadBalancerMode;
 
     public StoredCluster() {
     }
@@ -142,6 +154,12 @@ public class StoredCluster {
         this.networkGateway = other.networkGateway;
         this.serverIp = other.serverIp;
         this.nodesOutOfDate = other.nodesOutOfDate;
+        this.id = other.id;
+        this.workloadPool = other.workloadPool;
+        this.gkeServiceAccountIssuer = other.gkeServiceAccountIssuer;
+        this.jwks = other.jwks;
+        this.metadataRelayKey = other.metadataRelayKey;
+        this.loadBalancerMode = other.loadBalancerMode;
     }
 
     public String getName() {
@@ -486,5 +504,53 @@ public class StoredCluster {
 
     public void setNodesOutOfDate(boolean nodesOutOfDate) {
         this.nodesOutOfDate = nodesOutOfDate;
+    }
+
+    public String getId() {
+        return id;
+    }
+
+    public void setId(String id) {
+        this.id = id;
+    }
+
+    public String getWorkloadPool() {
+        return workloadPool;
+    }
+
+    public void setWorkloadPool(String workloadPool) {
+        this.workloadPool = workloadPool;
+    }
+
+    public boolean isGkeServiceAccountIssuer() {
+        return gkeServiceAccountIssuer;
+    }
+
+    public void setGkeServiceAccountIssuer(boolean gkeServiceAccountIssuer) {
+        this.gkeServiceAccountIssuer = gkeServiceAccountIssuer;
+    }
+
+    public String getJwks() {
+        return jwks;
+    }
+
+    public void setJwks(String jwks) {
+        this.jwks = jwks;
+    }
+
+    public String getMetadataRelayKey() {
+        return metadataRelayKey;
+    }
+
+    public void setMetadataRelayKey(String metadataRelayKey) {
+        this.metadataRelayKey = metadataRelayKey;
+    }
+
+    public String getLoadBalancerMode() {
+        return loadBalancerMode;
+    }
+
+    public void setLoadBalancerMode(String loadBalancerMode) {
+        this.loadBalancerMode = loadBalancerMode;
     }
 }

@@ -147,4 +147,23 @@ class GkeNodesTest {
         assertEquals("kube-reserved=cpu=90m,memory=3645Mi", GkeNodes.kubeReserved(n2, 6, 10 * GIB));
         assertEquals(255, GkeNodes.reservedMemoryMb(512));
     }
+
+    @Test
+    void onlyNodesRunningTheGkeMetadataServerCarryItsLabel() {
+        GkeNodes.NodeSpec gke = GkeNodes.spec("p1", "wi", "us-central1-a", "n", Map.of(), 110, false, 0, 0, true);
+        GkeNodes.NodeSpec gce = GkeNodes.spec("p1", "wi", "us-central1-a", "n", Map.of(), 110, false, 0, 0, false);
+
+        assertEquals("true", gke.labels().get("iam.gke.io/gke-metadata-server-enabled"));
+        assertFalse(gce.labels().containsKey("iam.gke.io/gke-metadata-server-enabled"));
+    }
+
+    @Test
+    void theWorkloadMetadataModeReadsTheV1beta1NodeMetadataToo() {
+        assertEquals("GKE_METADATA", GkeNodes.metadataMode(Map.of("workloadMetadataConfig", Map.of("mode", "GKE_METADATA"))));
+        assertEquals("GKE_METADATA", GkeNodes.metadataMode(Map.of("workloadMetadataConfig",
+                Map.of("nodeMetadata", "GKE_METADATA_SERVER"))));
+        assertEquals("GCE_METADATA", GkeNodes.metadataMode(Map.of("workloadMetadataConfig", Map.of("nodeMetadata", "EXPOSE"))));
+        assertEquals(null, GkeNodes.metadataMode(Map.of()));
+        assertEquals(null, GkeNodes.metadataMode(null));
+    }
 }

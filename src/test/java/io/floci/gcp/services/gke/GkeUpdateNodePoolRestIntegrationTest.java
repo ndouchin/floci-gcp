@@ -114,4 +114,27 @@ class GkeUpdateNodePoolRestIntegrationTest {
                 .statusCode(200)
                 .body("version", equalTo(versionBefore));
     }
+
+    /** The body terraform-provider-google sends for a {@code workload_metadata_config} change (node_config.go). */
+    @Test
+    void terraformsWorkloadMetadataUpdateIsAppliedToThePool() {
+        String cluster = "wi-metadata";
+        String poolPath = BASE + "/clusters/" + cluster + "/nodePools/default-pool";
+        given().contentType("application/json")
+                .body("{\"cluster\":{\"name\":\"" + cluster + "\",\"workloadIdentityConfig\":"
+                        + "{\"workloadPool\":\"" + PROJECT + ".svc.id.goog\"}}}")
+                .when().post(BASE + "/clusters")
+                .then().statusCode(200);
+        given().when().get(poolPath).then().statusCode(200)
+                .body("config.workloadMetadataConfig.mode", equalTo("GKE_METADATA"));
+
+        given().contentType("application/json")
+                .body("{\"name\":\"projects/" + PROJECT + "/locations/" + LOCATION + "/clusters/" + cluster
+                        + "/nodePools/default-pool\",\"workloadMetadataConfig\":{\"mode\":\"GCE_METADATA\"}}")
+                .when().put(poolPath)
+                .then().statusCode(200);
+
+        given().when().get(poolPath).then().statusCode(200)
+                .body("config.workloadMetadataConfig.mode", equalTo("GCE_METADATA"));
+    }
 }

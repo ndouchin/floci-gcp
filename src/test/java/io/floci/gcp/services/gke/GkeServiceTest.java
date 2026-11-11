@@ -3,6 +3,8 @@ package io.floci.gcp.services.gke;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.ProjectNumbers;
+import io.floci.gcp.core.common.WorkloadIdentityIssuers;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.gke.model.StoredCluster;
 import io.floci.gcp.services.gke.model.StoredNode;
@@ -33,6 +35,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
@@ -56,6 +62,10 @@ class GkeServiceTest {
     EmulatorConfig.GkeServiceConfig gkeConfig;
     @Mock
     GkeClusterManager clusterManager;
+    @Mock
+    EmulatorConfig.GkeServiceConfig.GkeMetadataServerConfig metadataServer;
+    @Mock
+    EmulatorConfig.GkeServiceConfig.GkeLoadBalancerConfig loadBalancer;
 
     private GkeService service;
     private InMemoryStorage<String, StoredOperation> operationStore;
@@ -83,6 +93,10 @@ class GkeServiceTest {
         when(services.gke()).thenReturn(gkeConfig);
         when(gkeConfig.mock()).thenReturn(true);
         when(gkeConfig.maxNodesPerCluster()).thenReturn(5);
+        when(gkeConfig.metadataServer()).thenReturn(metadataServer);
+        when(metadataServer.enabled()).thenReturn(true);
+        when(gkeConfig.loadBalancer()).thenReturn(loadBalancer);
+        when(loadBalancer.mode()).thenReturn("emulated");
         when(config.baseUrl()).thenReturn("http://localhost:4588");
         when(clusterManager.imageFor(any())).thenAnswer(inv -> "k3s:" + GkeReleases.minorOf(inv.getArgument(0)));
         when(clusterManager.hostResources()).thenReturn(new GkeClusterManager.HostResources(6, 10L << 30));
@@ -397,6 +411,131 @@ class GkeServiceTest {
     }
 
     @Test
+    void poolsOfAWorkloadIdentityClusterDefaultToTheGkeMetadataServer() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "wi", "initialNodeCount", 1,
+                "workloadIdentityConfig", Map.of("workloadPool", PROJECT + ".svc.id.goog")));
+        service.createNodePool(PROJECT, LOCATION, "wi", Map.of("name", "workers"));
+        service.createNodePool(PROJECT, LOCATION, "wi", Map.of("name", "legacy",
+                "config", Map.of("workloadMetadataConfig", Map.of("mode", "GCE_METADATA"))));
+
+        assertEquals(Map.of("mode", "GKE_METADATA"), service.getNodePool(PROJECT, LOCATION, "wi", "default-pool")
+                .getConfig().get("workloadMetadataConfig"));
+        assertEquals(Map.of("mode", "GKE_METADATA"), service.getNodePool(PROJECT, LOCATION, "wi", "workers")
+                .getConfig().get("workloadMetadataConfig"));
+        assertEquals(Map.of("mode", "GCE_METADATA"), service.getNodePool(PROJECT, LOCATION, "wi", "legacy")
+                .getConfig().get("workloadMetadataConfig"));
+    }
+
+    @Test
+    void enablingWorkloadIdentityLeavesExistingPoolsAlone() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "late", "initialNodeCount", 1));
+        service.updateCluster(PROJECT, LOCATION, "late",
+                Map.of("desiredWorkloadIdentityConfig", Map.of("workloadPool", PROJECT + ".svc.id.goog")));
+        service.createNodePool(PROJECT, LOCATION, "late", Map.of("name", "after"));
+
+        Map<String, Object> existing = service.getNodePool(PROJECT, LOCATION, "late", "default-pool").getConfig();
+        assertTrue(existing == null || !existing.containsKey("workloadMetadataConfig"));
+        assertEquals(Map.of("mode", "GKE_METADATA"), service.getNodePool(PROJECT, LOCATION, "late", "after")
+                .getConfig().get("workloadMetadataConfig"));
+    }
+
+    @Test
+    void theGkeMetadataServerNeedsWorkloadIdentityOnTheCluster() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "plain"));
+        Map<String, Object> gkeMetadata = Map.of("workloadMetadataConfig", Map.of("mode", "GKE_METADATA"));
+
+        GcpException pool = assertThrows(GcpException.class, () -> service.createNodePool(PROJECT, LOCATION, "plain",
+                Map.of("name", "wi", "config", gkeMetadata)));
+        assertEquals(400, pool.getHttpStatus());
+        assertThrows(GcpException.class, () -> service.getNodePool(PROJECT, LOCATION, "plain", "wi"));
+        assertThrows(GcpException.class, () -> service.createCluster(PROJECT, LOCATION,
+                Map.of("name", "half", "nodeConfig", gkeMetadata)));
+        assertThrows(GcpException.class, () -> service.getCluster(PROJECT, LOCATION, "half"));
+        assertThrows(GcpException.class, () -> service.updateNodePool(PROJECT, LOCATION, "plain", "default-pool",
+                gkeMetadata));
+        assertThrows(GcpException.class, () -> service.createCluster(PROJECT, LOCATION, Map.of("name", "beta",
+                "nodeConfig", Map.of("workloadMetadataConfig", Map.of("nodeMetadata", "GKE_METADATA_SERVER")))));
+    }
+
+    @Test
+    void updateNodePoolAppliesTheWorkloadMetadataMode() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "switch",
+                "workloadIdentityConfig", Map.of("workloadPool", PROJECT + ".svc.id.goog")));
+        service.updateNodePool(PROJECT, LOCATION, "switch", "default-pool",
+                Map.of("workloadMetadataConfig", Map.of("mode", "GCE_METADATA")));
+
+        assertEquals(Map.of("mode", "GCE_METADATA"), service.getNodePool(PROJECT, LOCATION, "switch", "default-pool")
+                .getConfig().get("workloadMetadataConfig"));
+    }
+
+    @Test
+    void switchingAPoolsMetadataModeRelabelsItsNodesInPlace() {
+        runRealCluster("relabel", Map.of("initialNodeCount", 1,
+                "workloadIdentityConfig", Map.of("workloadPool", PROJECT + ".svc.id.goog")));
+        service.pollReadiness();
+        markNodesReady("us-central1-a", "relabel");
+        service.pollReadiness();
+        String node = service.getNodePool(PROJECT, "us-central1-a", "relabel", "default-pool").getNodes().get(0).getName();
+
+        service.updateNodePool(PROJECT, "us-central1-a", "relabel", "default-pool",
+                Map.of("workloadMetadataConfig", Map.of("mode", "GCE_METADATA")));
+        verify(clusterManager).unlabelNode(any(), eq(node),
+                eq(List.of(GkeNodes.GKE_METADATA_SERVER_LABEL)));
+
+        service.updateNodePool(PROJECT, "us-central1-a", "relabel", "default-pool",
+                Map.of("workloadMetadataConfig", Map.of("mode", "GKE_METADATA")));
+        verify(clusterManager).labelNode(any(), eq(node),
+                eq(Map.of(GkeNodes.GKE_METADATA_SERVER_LABEL, "true")));
+        verify(clusterManager, times(1)).startNode(any(), any(), any());
+        verify(clusterManager).programMetadataRouting(any(), argThat(n ->
+                node.equals(n.getName())), eq(false));
+        verify(clusterManager).programMetadataRouting(any(), argThat(n ->
+                node.equals(n.getName())), eq(true));
+    }
+
+    @Test
+    void everyNodeGetsAMetadataRelayOnceItsContainerStarts() {
+        runRealCluster("relays", Map.of("initialNodeCount", 1,
+                "workloadIdentityConfig", Map.of("workloadPool", PROJECT + ".svc.id.goog")));
+        service.createNodePool(PROJECT, "us-central1-a", "relays", Map.of("name", "plain", "initialNodeCount", 1,
+                "config", Map.of("workloadMetadataConfig", Map.of("mode", "GCE_METADATA"))));
+
+        service.pollReadiness();
+
+        String wi = service.getNodePool(PROJECT, "us-central1-a", "relays", "default-pool").getNodes().get(0).getName();
+        String plain = service.getNodePool(PROJECT, "us-central1-a", "relays", "plain").getNodes().get(0).getName();
+        verify(clusterManager, atLeastOnce()).ensureMetadataRelay(any(),
+                argThat(n -> wi.equals(n.getName())), eq(true));
+        verify(clusterManager, atLeastOnce()).ensureMetadataRelay(any(),
+                argThat(n -> plain.equals(n.getName())), eq(false));
+        assertNotNull(service.getCluster(PROJECT, "us-central1-a", "relays").getMetadataRelayKey());
+    }
+
+    @Test
+    void noRelayRunsWhenTheMetadataServerIsDisabled() {
+        when(metadataServer.enabled()).thenReturn(false);
+        runRealCluster("no-relay", Map.of("initialNodeCount", 1));
+        service.pollReadiness();
+
+        verify(clusterManager, times(1)).startNode(any(), any(), any());
+        verify(clusterManager, never()).ensureMetadataRelay(any(), any(), anyBoolean());
+    }
+
+    @Test
+    void aNodeRestartedBehindTheEmulatorsBackGetsItsRelayBack() {
+        runRealCluster("watched", Map.of("initialNodeCount", 1));
+        service.pollReadiness();
+        markNodesReady("us-central1-a", "watched");
+        service.pollReadiness();
+        verify(clusterManager, times(1)).ensureMetadataRelay(any(), any(), anyBoolean());
+
+        when(clusterManager.metadataRelayCurrent(any())).thenReturn(false);
+        service.watchMetadataRelays(PROJECT, "us-central1-a", "watched");
+
+        verify(clusterManager, times(2)).ensureMetadataRelay(any(), any(), anyBoolean());
+    }
+
+    @Test
     void aNewClustersNodePoolGetsANodeOnceItsControlPlaneRuns() {
         runRealCluster("nodes", Map.of("initialNodeCount", 1, "nodeConfig", Map.of("machineType", "e2-standard-2")));
         StoredNodePool pool = service.getNodePool(PROJECT, "us-central1-a", "nodes", "default-pool");
@@ -498,7 +637,7 @@ class GkeServiceTest {
                 .getNodes().get(0);
         assertNotEquals(before, replacement.getName());
         assertEquals("k3s:36", replacement.getImage());
-        verify(clusterManager).deleteKubernetesNodes(any(), org.mockito.ArgumentMatchers.eq(List.of(before)));
+        verify(clusterManager).deleteKubernetesNodes(any(), eq(List.of(before)));
     }
 
     @Test
@@ -575,8 +714,8 @@ class GkeServiceTest {
         when(clusterManager.nodeStates(any())).thenReturn(states);
         service.pollReadiness();
 
-        verify(clusterManager).setGpuCapacity(any(), org.mockito.ArgumentMatchers.eq(gpuNode.getName()),
-                org.mockito.ArgumentMatchers.eq(1));
+        verify(clusterManager).setGpuCapacity(any(), eq(gpuNode.getName()),
+                eq(1));
         assertEquals("PROVISIONING", service.getNodePool(PROJECT, "us-central1-a", "gpus", "t4").getStatus());
 
         states.put(gpuNode.getName(), new GkeClusterManager.NodeState(true, Map.of(), 1));
@@ -825,20 +964,98 @@ class GkeServiceTest {
 
     @Test
     void extraConfigRoundTripsUnknownClusterFieldsFromCreation() {
-        // ip_allocation_policy / private_cluster_config / workload_identity_config style blocks:
-        // the emulator doesn't act on them, but must echo them back unchanged.
+        // ip_allocation_policy / private_cluster_config style blocks: the emulator doesn't act on
+        // them, but must echo them back unchanged.
         service.createCluster(PROJECT, LOCATION, Map.of(
                 "name", "full-config",
                 "ipAllocationPolicy", Map.of("useIpAliases", true, "clusterSecondaryRangeName", "pods"),
-                "privateClusterConfig", Map.of("enablePrivateNodes", true),
-                "workloadIdentityConfig", Map.of("workloadPool", "test-project.svc.id.goog")));
+                "privateClusterConfig", Map.of("enablePrivateNodes", true)));
 
         StoredCluster cluster = service.getCluster(PROJECT, LOCATION, "full-config");
         assertEquals(true, ((Map<?, ?>) cluster.getExtraConfig().get("ipAllocationPolicy")).get("useIpAliases"));
         assertEquals(true, ((Map<?, ?>) cluster.getExtraConfig().get("privateClusterConfig"))
                 .get("enablePrivateNodes"));
-        assertEquals("test-project.svc.id.goog",
-                ((Map<?, ?>) cluster.getExtraConfig().get("workloadIdentityConfig")).get("workloadPool"));
+    }
+
+    @Test
+    void theProjectsWorkloadPoolIsATypedClusterField() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "wi",
+                "workloadIdentityConfig", Map.of("workloadPool", PROJECT + ".svc.id.goog")));
+
+        StoredCluster cluster = service.getCluster(PROJECT, LOCATION, "wi");
+        assertEquals(PROJECT + ".svc.id.goog", cluster.getWorkloadPool());
+        assertFalse(cluster.getExtraConfig().containsKey("workloadIdentityConfig"));
+    }
+
+    @Test
+    void anotherProjectsWorkloadPoolIsRejected() {
+        GcpException e = assertThrows(GcpException.class, () -> service.createCluster(PROJECT, LOCATION,
+                Map.of("name", "wi", "workloadIdentityConfig", Map.of("workloadPool", "other-project.svc.id.goog"))));
+        assertEquals(400, e.getHttpStatus());
+        assertThrows(GcpException.class, () -> service.getCluster(PROJECT, LOCATION, "wi"));
+    }
+
+    @Test
+    void desiredWorkloadIdentityConfigEnablesThenDisablesWorkloadIdentity() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "later"));
+        assertNull(service.getCluster(PROJECT, LOCATION, "later").getWorkloadPool());
+
+        service.updateCluster(PROJECT, LOCATION, "later",
+                Map.of("desiredWorkloadIdentityConfig", Map.of("workloadPool", PROJECT + ".svc.id.goog")));
+        assertEquals(PROJECT + ".svc.id.goog", service.getCluster(PROJECT, LOCATION, "later").getWorkloadPool());
+
+        service.updateCluster(PROJECT, LOCATION, "later",
+                Map.of("desiredWorkloadIdentityConfig", Map.of("workloadPool", "")));
+        StoredCluster disabled = service.getCluster(PROJECT, LOCATION, "later");
+        assertNull(disabled.getWorkloadPool());
+        assertFalse(disabled.getExtraConfig().containsKey("workloadIdentityConfig"));
+
+        assertThrows(GcpException.class, () -> service.updateCluster(PROJECT, LOCATION, "later",
+                Map.of("desiredWorkloadIdentityConfig", Map.of("workloadPool", "elsewhere.svc.id.goog"))));
+        assertNull(service.getCluster(PROJECT, LOCATION, "later").getWorkloadPool());
+    }
+
+    @Test
+    void theV1beta1IdentityNamespaceNamesTheWorkloadPool() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "beta",
+                "workloadIdentityConfig", Map.of("identityNamespace", PROJECT + ".svc.id.goog")));
+        assertEquals(PROJECT + ".svc.id.goog", service.getCluster(PROJECT, LOCATION, "beta").getWorkloadPool());
+    }
+
+    @Test
+    void autopilotClustersAlwaysHaveTheProjectsWorkloadPool() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "auto", "autopilot", Map.of("enabled", true)));
+        assertEquals(PROJECT + ".svc.id.goog", service.getCluster(PROJECT, LOCATION, "auto").getWorkloadPool());
+    }
+
+    @Test
+    void everyClusterHasAStableId() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "one"));
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "two"));
+
+        String id = service.getCluster(PROJECT, LOCATION, "one").getId();
+        assertTrue(id.matches("^[0-9a-f]{64}$"), id);
+        assertEquals(id, service.getCluster(PROJECT, LOCATION, "one").getId());
+        assertNotEquals(id, service.getCluster(PROJECT, LOCATION, "two").getId());
+    }
+
+    @Test
+    void clustersStoredBeforeTheTypedFieldsGetAnIdAndTheirEchoedWorkloadPool() {
+        StoredCluster legacy = new StoredCluster();
+        legacy.setName("legacy");
+        legacy.setProject(PROJECT);
+        legacy.setLocation(LOCATION);
+        legacy.setStatus("RUNNING");
+        legacy.setExtraConfig(new HashMap<>(Map.of("workloadIdentityConfig",
+                Map.of("workloadPool", PROJECT + ".svc.id.goog"))));
+        clusterStore.put("projects/" + PROJECT + "/locations/" + LOCATION + "/clusters/legacy", legacy);
+
+        service.init();
+
+        StoredCluster cluster = service.getCluster(PROJECT, LOCATION, "legacy");
+        assertEquals(PROJECT + ".svc.id.goog", cluster.getWorkloadPool());
+        assertFalse(cluster.getExtraConfig().containsKey("workloadIdentityConfig"));
+        assertTrue(cluster.getId().matches("^[0-9a-f]{64}$"));
     }
 
     @Test
@@ -1081,6 +1298,111 @@ class GkeServiceTest {
 
         assertEquals("DONE", service.getOperation(PROJECT, LOCATION, op.getName()).getStatus());
         assertEquals("RUNNING", service.getCluster(PROJECT, LOCATION, "upgrade-runtime").getStatus());
+    }
+
+    @Test
+    void newClustersRecordTheConfiguredLoadBalancerMode() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "lb"));
+        when(loadBalancer.mode()).thenReturn("servicelb");
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "klipper"));
+
+        assertEquals("emulated", service.getCluster(PROJECT, LOCATION, "lb").getLoadBalancerMode());
+        assertEquals("servicelb", service.getCluster(PROJECT, LOCATION, "klipper").getLoadBalancerMode());
+    }
+
+    @Test
+    void newClustersIssueServiceAccountTokensUnderTheGkeIssuer() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "issuer"));
+        assertTrue(service.getCluster(PROJECT, LOCATION, "issuer").isGkeServiceAccountIssuer());
+    }
+
+    @Test
+    void enablingWorkloadIdentityOnAClusterStoredByAnEarlierBuildMovesItsServerToTheGkeIssuer() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "round-one"));
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "current"));
+        clusterStore.get("projects/" + PROJECT + "/locations/" + LOCATION + "/clusters/round-one").orElseThrow()
+                .setGkeServiceAccountIssuer(false);
+        when(gkeConfig.mock()).thenReturn(false);
+        Map<String, Object> enable = Map.of("desiredWorkloadIdentityConfig",
+                Map.of("workloadPool", PROJECT + ".svc.id.goog"));
+
+        StoredOperation current = service.updateCluster(PROJECT, LOCATION, "current", enable);
+        assertEquals("DONE", current.getStatus());
+        verify(clusterManager, never()).replaceControlPlane(any());
+
+        StoredOperation op = service.updateCluster(PROJECT, LOCATION, "round-one", enable);
+
+        assertEquals("RUNNING", op.getStatus());
+        assertEquals(OperationType.UPDATE_CLUSTER, op.getOperationType());
+        verify(clusterManager).replaceControlPlane(argThat(
+                StoredCluster::isGkeServiceAccountIssuer));
+        StoredCluster moving = service.getCluster(PROJECT, LOCATION, "round-one");
+        assertEquals("RECONCILING", moving.getStatus());
+        assertEquals(PROJECT + ".svc.id.goog", moving.getWorkloadPool());
+        assertTrue(moving.isGkeServiceAccountIssuer());
+    }
+
+    @Test
+    void theJsonWebKeysAreTheOnesTheClustersApiServerPublishes() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "keys"));
+        assertEquals(Map.of("keys", List.of()), service.getJsonWebKeys(PROJECT, LOCATION, "keys"));
+
+        clusterStore.get("projects/" + PROJECT + "/locations/" + LOCATION + "/clusters/keys").orElseThrow()
+                .setJwks("{\"keys\":[{\"use\":\"sig\",\"kty\":\"RSA\",\"kid\":\"k1\",\"alg\":\"RS256\","
+                        + "\"n\":\"AQAB-n\",\"e\":\"AQAB\",\"x5c\":[\"ignored\"]}]}");
+
+        assertEquals(Map.of("keys", List.of(Map.of("kty", "RSA", "alg", "RS256", "use", "sig", "kid", "k1",
+                "n", "AQAB-n", "e", "AQAB"))), service.getJsonWebKeys(PROJECT, LOCATION, "keys"));
+    }
+
+    @Test
+    void theJsonWebKeysAreReadOnceTheControlPlaneIsReady() {
+        when(gkeConfig.mock()).thenReturn(false);
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "readback"));
+        when(clusterManager.isReady(any())).thenReturn(true);
+        doAnswer(inv -> {
+            StoredCluster probe = inv.getArgument(0);
+            probe.setCaCertificate("Y2E=");
+            probe.setJwks("{\"keys\":[{\"kty\":\"RSA\",\"kid\":\"k2\",\"n\":\"n\",\"e\":\"AQAB\"}]}");
+            return null;
+        }).when(clusterManager).finalizeCluster(any());
+
+        service.pollReadiness();
+
+        assertEquals("RUNNING", service.getCluster(PROJECT, LOCATION, "readback").getStatus());
+        assertEquals(Map.of("keys", List.of(Map.of("kty", "RSA", "kid", "k2", "n", "n", "e", "AQAB"))),
+                service.getJsonWebKeys(PROJECT, LOCATION, "readback"));
+    }
+
+    @Test
+    void clustersAreTheIdentityProvidersStsFederatesByIssuerUrl() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "provider",
+                "workloadIdentityConfig", Map.of("workloadPool", PROJECT + ".svc.id.goog")));
+        GkeWorkloadIdentityIssuers issuers = new GkeWorkloadIdentityIssuers(service);
+        String issuer = "https://container.googleapis.com/v1/projects/" + PROJECT + "/locations/" + LOCATION
+                + "/clusters/provider";
+
+        WorkloadIdentityIssuers.Provider provider = issuers.provider(issuer).orElseThrow();
+        assertEquals(issuer, provider.issuer());
+        assertEquals(PROJECT + ".svc.id.goog", provider.pool());
+        assertEquals(ProjectNumbers.of(PROJECT), provider.projectNumber());
+        assertTrue(issuers.provider(issuer.replace("provider", "missing")).isEmpty());
+        assertTrue(issuers.provider("https://example.com/issuer").isEmpty());
+    }
+
+    @Test
+    void theOpenIdConfigurationNamesTheClustersIssuerAndKeys() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "oidc"));
+        String issuer = "https://container.googleapis.com/v1/projects/" + PROJECT + "/locations/" + LOCATION
+                + "/clusters/oidc";
+
+        Map<String, Object> document = service.getOpenIdConfiguration(PROJECT, LOCATION, "oidc");
+
+        assertEquals(issuer, document.get("issuer"));
+        assertEquals(issuer + "/jwks", document.get("jwks_uri"));
+        assertEquals(List.of("id_token"), document.get("response_types_supported"));
+        assertEquals(List.of("public"), document.get("subject_types_supported"));
+        assertEquals(List.of("RS256"), document.get("id_token_signing_alg_values_supported"));
     }
 
     @Test

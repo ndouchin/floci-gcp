@@ -8,7 +8,7 @@ import jakarta.inject.Inject;
 
 import java.util.Optional;
 
-/** Resolves only identities represented by valid Floci-issued credential tokens. */
+/** Resolves only identities represented by valid Floci-issued credential tokens: service accounts, and GKE workloads federated through STS. */
 @ApplicationScoped
 public class IamPrincipalResolver {
 
@@ -36,6 +36,11 @@ public class IamPrincipalResolver {
         }
         if (token.get().getTokenKind() == StoredCredentialToken.TokenKind.DOWNSCOPED) {
             return Resolution.downscopedToken(token.get().getPrincipal());
+        }
+        if (token.get().getTokenKind() == StoredCredentialToken.TokenKind.FEDERATED) {
+            return new Resolution(new IamPrincipal(token.get().getPrincipal(), WorkloadIdentityPrincipals.aliases(
+                    WorkloadIdentityPrincipals.Workload.fromAttributes(token.get().getAttributes()))),
+                    IamIdentityKind.FLOCI_FEDERATED);
         }
         return Resolution.authenticated(IamPrincipal.serviceAccount(normalizeServiceAccount(token.get().getPrincipal())));
     }
