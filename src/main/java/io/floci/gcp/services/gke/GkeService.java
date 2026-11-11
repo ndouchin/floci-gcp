@@ -576,6 +576,32 @@ public class GkeService {
         return withNodePools(stored);
     }
 
+    /** A detached copy of a cluster, or empty when it does not exist. */
+    public Optional<StoredCluster> findCluster(String project, String location, String clusterId) {
+        return clusterStore.get(clusterKey(project, location, clusterId)).map(StoredCluster::new);
+    }
+
+    /** Reads a running cluster's JSON Web Key Set from its API server again and records it. */
+    public Optional<String> refreshJwks(String project, String location, String clusterId) {
+        String key = clusterKey(project, location, clusterId);
+        StoredCluster seen = clusterStore.get(key).map(StoredCluster::new).orElse(null);
+        if (mock() || seen == null || !"RUNNING".equals(seen.getStatus())) {
+            return Optional.empty();
+        }
+        String jwks = clusterManager.readJwks(seen);
+        if (jwks == null) {
+            return Optional.empty();
+        }
+        synchronized (lifecycleLock) {
+            clusterStore.get(key).filter(current -> Objects.equals(current.getContainerId(), seen.getContainerId()))
+                    .ifPresent(current -> {
+                        current.setJwks(jwks);
+                        clusterStore.put(key, current);
+                    });
+        }
+        return Optional.of(jwks);
+    }
+
     public List<StoredCluster> listClusters(String project, String location) {
         locations.requireListLocation(location, LocationCatalog.Kind.REGION, LocationCatalog.Kind.ZONE);
         return clusterStore.scan(k -> true).stream()

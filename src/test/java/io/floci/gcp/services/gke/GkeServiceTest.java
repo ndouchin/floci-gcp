@@ -1305,6 +1305,22 @@ class GkeServiceTest {
     }
 
     @Test
+    void clustersAreTheIdentityProvidersStsFederatesByIssuerUrl() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "provider",
+                "workloadIdentityConfig", Map.of("workloadPool", PROJECT + ".svc.id.goog")));
+        GkeWorkloadIdentityIssuers issuers = new GkeWorkloadIdentityIssuers(service);
+        String issuer = "https://container.googleapis.com/v1/projects/" + PROJECT + "/locations/" + LOCATION
+                + "/clusters/provider";
+
+        io.floci.gcp.core.common.WorkloadIdentityIssuers.Provider provider = issuers.provider(issuer).orElseThrow();
+        assertEquals(issuer, provider.issuer());
+        assertEquals(PROJECT + ".svc.id.goog", provider.pool());
+        assertEquals(io.floci.gcp.core.common.ProjectNumbers.of(PROJECT), provider.projectNumber());
+        assertTrue(issuers.provider(issuer.replace("provider", "missing")).isEmpty());
+        assertTrue(issuers.provider("https://example.com/issuer").isEmpty());
+    }
+
+    @Test
     void theOpenIdConfigurationNamesTheClustersIssuerAndKeys() {
         service.createCluster(PROJECT, LOCATION, Map.of("name", "oidc"));
         String issuer = "https://container.googleapis.com/v1/projects/" + PROJECT + "/locations/" + LOCATION
