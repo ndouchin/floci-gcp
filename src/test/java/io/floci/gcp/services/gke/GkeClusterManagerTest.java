@@ -92,4 +92,18 @@ class GkeClusterManagerTest {
         assertTrue(manifest.contains("metadata.google.internal:53 {"), manifest);
         assertTrue(manifest.contains("169.254.169.254 metadata.google.internal"), manifest);
     }
+
+    @Test
+    void k3sServiceLoadBalancerIsOffUnlessTheClusterKeepsIt() {
+        StoredCluster cluster = cluster();
+        cluster.setLoadBalancerMode("emulated");
+        assertTrue(GkeClusterManager.serverArgs(cluster, "n", false).contains("--disable=servicelb"));
+        cluster.setLoadBalancerMode("off");
+        assertTrue(GkeClusterManager.serverArgs(cluster, "n", false).contains("--disable=servicelb"));
+        cluster.setLoadBalancerMode("servicelb");
+        assertFalse(GkeClusterManager.serverArgs(cluster, "n", false).contains("--disable=servicelb"));
+        cluster.setLoadBalancerMode(null);
+        assertFalse(GkeClusterManager.serverArgs(cluster, "n", false).contains("--disable=servicelb"),
+                "a cluster stored by an earlier build keeps servicelb");
+    }
 }

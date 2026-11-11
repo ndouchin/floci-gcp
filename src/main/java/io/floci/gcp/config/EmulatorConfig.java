@@ -393,6 +393,30 @@ public interface EmulatorConfig {
             @WithDefault("nginx:1.30.6-alpine")
             String relayImage();
         }
+
+        GkeLoadBalancerConfig loadBalancer();
+
+        interface GkeLoadBalancerConfig {
+            /**
+             * Who serves Services of type LoadBalancer on new clusters: {@code emulated} (GKE-shaped addresses, one
+             * appliance container per Service), {@code servicelb} (k3s's own, node addresses) or {@code off}
+             * (Services stay pending). Env: FLOCI_GCP_SERVICES_GKE_LOAD_BALANCER_MODE
+             */
+            @WithDefault("emulated")
+            String mode();
+
+            /** How long an emulated load balancer stays pending before it gets its address. */
+            @WithDefault("0s")
+            Duration provisioningDelay();
+
+            /** Range external load balancer addresses come from; a TEST-NET range never routed on the internet. */
+            @WithDefault("203.0.113.0/24")
+            String publicCidr();
+
+            /** Host ports of load balancer appliances: {@code dynamic}, {@code same-as-service} or {@code none}. */
+            @WithDefault("dynamic")
+            String hostPorts();
+        }
     }
 
     interface GcsServiceConfig {

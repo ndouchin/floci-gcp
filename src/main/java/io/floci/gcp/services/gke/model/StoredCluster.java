@@ -94,6 +94,8 @@ public class StoredCluster {
     private String jwks;
     /** The secret the cluster's metadata relays present to floci-gcp's metadata responder. */
     private String metadataRelayKey;
+    /** Who serves LoadBalancer Services: {@code emulated}, {@code servicelb} or {@code off}; null (k3s's servicelb) for clusters of earlier builds. */
+    private String loadBalancerMode;
 
     public StoredCluster() {
     }
@@ -157,6 +159,7 @@ public class StoredCluster {
         this.gkeServiceAccountIssuer = other.gkeServiceAccountIssuer;
         this.jwks = other.jwks;
         this.metadataRelayKey = other.metadataRelayKey;
+        this.loadBalancerMode = other.loadBalancerMode;
     }
 
     public String getName() {
@@ -541,5 +544,13 @@ public class StoredCluster {
 
     public void setMetadataRelayKey(String metadataRelayKey) {
         this.metadataRelayKey = metadataRelayKey;
+    }
+
+    public String getLoadBalancerMode() {
+        return loadBalancerMode;
+    }
+
+    public void setLoadBalancerMode(String loadBalancerMode) {
+        this.loadBalancerMode = loadBalancerMode;
     }
 }

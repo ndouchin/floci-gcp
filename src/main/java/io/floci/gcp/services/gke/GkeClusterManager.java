@@ -68,6 +68,8 @@ public class GkeClusterManager {
     static final String ROLE_CONTROL_PLANE = "control-plane";
     static final String ROLE_NODE = "node";
     static final String ROLE_METADATA_RELAY = "metadata-relay";
+    static final String ROLE_LOAD_BALANCER = "load-balancer";
+    static final String LOAD_BALANCER_MODE_LABEL = "io.floci.load-balancer-mode";
     private static final String RELAY_SUFFIX = "-metadata";
     static final String NODE_POOL_LABEL = "io.floci.gke-node-pool";
     static final String NODE_LABEL = "io.floci.gke-node";
@@ -412,6 +414,8 @@ public class GkeClusterManager {
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "gke", cluster.getName(), cluster.getProject(), cluster.getLocation()))
                 .withLabel(ROLE_LABEL, ROLE_CONTROL_PLANE)
+                .withLabel(LOAD_BALANCER_MODE_LABEL, cluster.getLoadBalancerMode() == null
+                        ? GkeLoadBalancers.MODE_SERVICELB : cluster.getLoadBalancerMode())
                 .withDockerNetwork(config.services().gke().dockerNetwork())
                 .withPrivileged(true)
                 .withLogRotation();
@@ -463,6 +467,9 @@ public class GkeClusterManager {
                 "--kube-apiserver-arg=enable-admission-plugins=ExtendedResourceToleration"));
         if (cluster.getServerIp() != null) {
             args.add("--advertise-address=" + cluster.getServerIp());
+        }
+        if (GkeLoadBalancers.replacesServiceLb(cluster.getLoadBalancerMode())) {
+            args.add("--disable=servicelb");
         }
         if (cluster.getClusterIpv4Cidr() != null && cluster.getServicesIpv4Cidr() != null) {
             args.add("--cluster-cidr=" + cluster.getClusterIpv4Cidr());

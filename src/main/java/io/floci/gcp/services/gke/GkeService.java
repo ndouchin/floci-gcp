@@ -428,6 +428,7 @@ public class GkeService {
         cluster.setWorkloadPool(workloadPool);
         cluster.setGkeServiceAccountIssuer(true);
         cluster.setMetadataRelayKey(newClusterId());
+        cluster.setLoadBalancerMode(config.services().gke().loadBalancer().mode());
         if (!ranges.routesBased()) {
             putExtraConfig(cluster, "ipAllocationPolicy", vpcNativePolicy(clusterMap.get("ipAllocationPolicy"), ranges));
         }

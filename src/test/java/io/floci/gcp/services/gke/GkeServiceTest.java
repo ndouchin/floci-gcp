@@ -58,6 +58,8 @@ class GkeServiceTest {
     GkeClusterManager clusterManager;
     @Mock
     EmulatorConfig.GkeServiceConfig.GkeMetadataServerConfig metadataServer;
+    @Mock
+    EmulatorConfig.GkeServiceConfig.GkeLoadBalancerConfig loadBalancer;
 
     private GkeService service;
     private InMemoryStorage<String, StoredOperation> operationStore;
@@ -87,6 +89,8 @@ class GkeServiceTest {
         when(gkeConfig.maxNodesPerCluster()).thenReturn(5);
         when(gkeConfig.metadataServer()).thenReturn(metadataServer);
         when(metadataServer.enabled()).thenReturn(true);
+        when(gkeConfig.loadBalancer()).thenReturn(loadBalancer);
+        when(loadBalancer.mode()).thenReturn("emulated");
         when(config.baseUrl()).thenReturn("http://localhost:4588");
         when(clusterManager.imageFor(any())).thenAnswer(inv -> "k3s:" + GkeReleases.minorOf(inv.getArgument(0)));
         when(clusterManager.hostResources()).thenReturn(new GkeClusterManager.HostResources(6, 10L << 30));
@@ -1288,6 +1292,16 @@ class GkeServiceTest {
 
         assertEquals("DONE", service.getOperation(PROJECT, LOCATION, op.getName()).getStatus());
         assertEquals("RUNNING", service.getCluster(PROJECT, LOCATION, "upgrade-runtime").getStatus());
+    }
+
+    @Test
+    void newClustersRecordTheConfiguredLoadBalancerMode() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "lb"));
+        when(loadBalancer.mode()).thenReturn("servicelb");
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "klipper"));
+
+        assertEquals("emulated", service.getCluster(PROJECT, LOCATION, "lb").getLoadBalancerMode());
+        assertEquals("servicelb", service.getCluster(PROJECT, LOCATION, "klipper").getLoadBalancerMode());
     }
 
     @Test

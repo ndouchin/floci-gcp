@@ -185,6 +185,13 @@ floci-gcp:
       metadata-server:
         enabled: true
         relay-image: "nginx:1.30.6-alpine"
+      # Services of type LoadBalancer on new clusters: emulated (GKE-shaped addresses, one appliance
+      # container per Service), servicelb (k3s's, node addresses) or off.
+      load-balancer:
+        mode: emulated
+        provisioning-delay: 0s
+        public-cidr: "203.0.113.0/24"
+        host-ports: dynamic
     serviceusage:
       enabled: true
       # Reject calls to APIs that are not ENABLED in Service Usage for the caller's project
