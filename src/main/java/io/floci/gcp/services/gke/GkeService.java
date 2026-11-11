@@ -489,18 +489,20 @@ public class GkeService {
         String key = clusterKey(project, location, clusterId);
         StoredCluster cluster = clusterStore.get(key)
                 .orElseThrow(() -> GcpException.notFound("Not found: cluster " + clusterId));
-        if (!mock()) {
-            synchronized (clusterLock(key)) {
+        // The records go while the cluster lock is held, so a node reconcile waiting on it finds no
+        // cluster rather than one whose containers are gone.
+        synchronized (clusterLock(key)) {
+            if (!mock()) {
                 clusterManager.deleteCluster(cluster);
             }
-        }
-        for (StoredNodePool pool : listNodePools(project, location, clusterId)) {
-            nodePoolStore.delete(nodePoolKey(project, location, clusterId, pool.getName()));
-        }
-        synchronized (lifecycleLock) {
-            clusterStore.delete(key);
-            operationService.completeOperation(cluster.getCreateOperation(), operationError(Status.Code.CANCELLED,
-                    "Cluster " + clusterId + " was deleted before it finished creating"));
+            for (StoredNodePool pool : listNodePools(project, location, clusterId)) {
+                nodePoolStore.delete(nodePoolKey(project, location, clusterId, pool.getName()));
+            }
+            synchronized (lifecycleLock) {
+                clusterStore.delete(key);
+                operationService.completeOperation(cluster.getCreateOperation(), operationError(Status.Code.CANCELLED,
+                        "Cluster " + clusterId + " was deleted before it finished creating"));
+            }
         }
         return operationService.createOperation(project, location, clusterId, OperationType.DELETE_CLUSTER);
     }
