@@ -42,6 +42,9 @@ public class StoredCluster {
     private String network;
     private String subnetwork;
     private String clusterIpv4Cidr;
+    private String servicesIpv4Cidr;
+    /** Prefix of each node's Pod range; 0 for clusters stored before ranges were applied to k3s. */
+    private int nodePodCidrSize;
     private List<String> locations;
     private String loggingService;
     private String monitoringService;
@@ -112,6 +115,8 @@ public class StoredCluster {
         this.network = other.network;
         this.subnetwork = other.subnetwork;
         this.clusterIpv4Cidr = other.clusterIpv4Cidr;
+        this.servicesIpv4Cidr = other.servicesIpv4Cidr;
+        this.nodePodCidrSize = other.nodePodCidrSize;
         this.locations = other.locations == null ? null : new ArrayList<>(other.locations);
         this.loggingService = other.loggingService;
         this.monitoringService = other.monitoringService;
@@ -265,6 +270,22 @@ public class StoredCluster {
 
     public void setClusterIpv4Cidr(String clusterIpv4Cidr) {
         this.clusterIpv4Cidr = clusterIpv4Cidr;
+    }
+
+    public String getServicesIpv4Cidr() {
+        return servicesIpv4Cidr;
+    }
+
+    public void setServicesIpv4Cidr(String servicesIpv4Cidr) {
+        this.servicesIpv4Cidr = servicesIpv4Cidr;
+    }
+
+    public int getNodePodCidrSize() {
+        return nodePodCidrSize;
+    }
+
+    public void setNodePodCidrSize(int nodePodCidrSize) {
+        this.nodePodCidrSize = nodePodCidrSize;
     }
 
     public List<String> getLocations() {

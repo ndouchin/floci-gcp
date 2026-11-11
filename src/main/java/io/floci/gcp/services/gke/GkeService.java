@@ -343,6 +343,9 @@ public class GkeService {
         String masterVersion = requestedVersion == null ? GkeReleases.defaultRelease(channel).gkeVersion()
                 : resolveVersion("initialClusterVersion", requestedVersion, "Master", channel);
         validateNodePoolVersions(clusterMap.get("nodePools"), masterVersion, channel);
+        String network = stringField(clusterMap, "network", "default");
+        GkeNetworking.Ranges ranges = GkeNetworking.resolve(clusterMap, defaultMaxPods(clusterMap),
+                takenRanges(project, network));
 
         StoredCluster cluster = new StoredCluster();
         cluster.setName(name);
@@ -358,9 +361,11 @@ public class GkeService {
         cluster.setInitialClusterVersion(cluster.getCurrentMasterVersion());
         Object initialNodeCount = clusterMap.get("initialNodeCount");
         cluster.setInitialNodeCount(initialNodeCount instanceof Number n ? n.intValue() : 3);
-        cluster.setNetwork(stringField(clusterMap, "network", "default"));
+        cluster.setNetwork(network);
         cluster.setSubnetwork(stringField(clusterMap, "subnetwork", "default"));
-        cluster.setClusterIpv4Cidr(stringField(clusterMap, "clusterIpv4Cidr", "10.0.0.0/14"));
+        cluster.setClusterIpv4Cidr(ranges.podCidr());
+        cluster.setServicesIpv4Cidr(ranges.servicesCidr());
+        cluster.setNodePodCidrSize(ranges.nodeMaskSize());
         cluster.setLocations(stringListField(clusterMap, "locations", List.of(location)));
         cluster.setLoggingService(stringField(clusterMap, "loggingService", "logging.googleapis.com/kubernetes"));
         cluster.setMonitoringService(
@@ -371,6 +376,9 @@ public class GkeService {
         cluster.setSelfLink(clusterSelfLink(project, location, name));
         cluster.setEtag(newFingerprint());
         cluster.setExtraConfig(extraFields(clusterMap, TYPED_CLUSTER_FIELDS));
+        if (!ranges.routesBased()) {
+            putExtraConfig(cluster, "ipAllocationPolicy", vpcNativePolicy(clusterMap.get("ipAllocationPolicy"), ranges));
+        }
 
         StoredOperation op;
         String startFailure = null;
@@ -408,6 +416,42 @@ public class GkeService {
         }
         operationService.completeOperation(op.getName(), operationError(Status.Code.INTERNAL, startFailure));
         return operationService.getOperation(project, location, op.getName());
+    }
+
+    /** The {@code ipAllocationPolicy} a VPC-native cluster reports: the request's, with the ranges it got. */
+    private static Map<String, Object> vpcNativePolicy(Object requested, GkeNetworking.Ranges ranges) {
+        Map<String, Object> policy = new LinkedHashMap<>();
+        if (requested instanceof Map<?, ?> m) {
+            m.forEach((k, v) -> policy.put(String.valueOf(k), v));
+        }
+        policy.put("useIpAliases", true);
+        policy.put("clusterIpv4Cidr", ranges.podCidr());
+        policy.put("clusterIpv4CidrBlock", ranges.podCidr());
+        policy.put("servicesIpv4Cidr", ranges.servicesCidr());
+        policy.put("servicesIpv4CidrBlock", ranges.servicesCidr());
+        policy.putIfAbsent("stackType", "IPV4");
+        return policy;
+    }
+
+    /** {@code defaultMaxPodsConstraint.maxPodsPerNode}, else GKE's 110. */
+    private static int defaultMaxPods(Map<String, Object> clusterMap) {
+        Object max = clusterMap.get("defaultMaxPodsConstraint") instanceof Map<?, ?> m ? m.get("maxPodsPerNode") : null;
+        return GkeNodes.intValue(max, GkeNodes.DEFAULT_MAX_PODS);
+    }
+
+    /** Ranges an automatically chosen Pod range avoids: the other clusters' on the network, and the emulator's address. */
+    private List<String> takenRanges(String project, String network) {
+        List<String> taken = new ArrayList<>();
+        for (StoredCluster other : clusterStore.scan(k -> true)) {
+            if (project.equals(other.getProject()) && network.equals(other.getNetwork())) {
+                taken.add(other.getClusterIpv4Cidr());
+                taken.add(other.getServicesIpv4Cidr());
+            }
+        }
+        if (!mock()) {
+            clusterManager.emulatorAddress().ifPresent(taken::add);
+        }
+        return taken;
     }
 
     private static Map<String, Object> operationError(Status.Code code, String message) {

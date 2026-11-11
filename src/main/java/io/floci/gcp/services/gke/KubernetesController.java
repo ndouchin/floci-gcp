@@ -487,6 +487,13 @@ public class KubernetesController {
         networkConfig.put("subnetwork", cluster.getSubnetwork());
         result.put("networkConfig", networkConfig);
         result.put("clusterIpv4Cidr", cluster.getClusterIpv4Cidr());
+        if (cluster.getServicesIpv4Cidr() != null) {
+            result.put("servicesIpv4Cidr", cluster.getServicesIpv4Cidr());
+        }
+        if (cluster.getExtraConfig() != null && cluster.getExtraConfig().get("ipAllocationPolicy") instanceof Map<?, ?> policy
+                && Boolean.TRUE.equals(policy.get("useRoutes")) && cluster.getNodePodCidrSize() > 0) {
+            result.put("nodeIpv4CidrSize", cluster.getNodePodCidrSize());
+        }
         result.put("locations", cluster.getLocations());
         result.put("loggingService", cluster.getLoggingService());
         result.put("monitoringService", cluster.getMonitoringService());

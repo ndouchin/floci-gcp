@@ -378,6 +378,54 @@ Deviations, all on what `local-path-provisioner` can do:
 - The provisioner and its helper (`rancher/mirrored-library-busybox:1.37.0`) are pulled by the nodes
   from Docker Hub.
 
+## Networking
+
+Every cluster, mock or real, gets the Pod and Service ranges GKE would give it, reports them, and a
+real cluster runs on them.
+
+- **Mode.** VPC-native unless `ipAllocationPolicy.useRoutes` is `true`: "VPC-native is the default
+  network mode for all new clusters ... created through any surface, including ... GKE API"
+  ([VPC-native clusters](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/alias-ips)).
+  `useRoutes` and `useIpAliases` both `true` is rejected, as the
+  [API reference](https://docs.cloud.google.com/kubernetes-engine/docs/reference/rest/v1/projects.locations.clusters)
+  says it cannot be.
+- **Pod range.** VPC-native: `ipAllocationPolicy.clusterIpv4CidrBlock`, else the deprecated
+  `ipAllocationPolicy.clusterIpv4Cidr`, else `clusterIpv4Cidr`; routes-based: `clusterIpv4Cidr`. A
+  CIDR is used as given; a bare size (`/17`) or nothing gets a block of that size (default `/14`)
+  from `10.0.0.0/8` that overlaps no range of the project's other clusters on the same network nor
+  the address the cluster reaches the emulator on. GKE picks that block at random
+  ([Create a VPC-native cluster](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/alias-ips));
+  the emulator takes the first free one so runs are reproducible. Routes-based Pod ranges must be
+  `/9` to `/19` ([routes-based cluster](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/routes-based-cluster)).
+- **Service range.** VPC-native: `ipAllocationPolicy.servicesIpv4CidrBlock` (or the deprecated
+  `servicesIpv4Cidr`) when it is a CIDR, else the GKE-managed `34.118.224.0/20`, which Standard
+  clusters from 1.29 use by default; a bare size of `/20` or smaller takes the start of that managed
+  range (same VPC-native page). A bare size larger than `/20` gets a block from `10.0.0.0/8`, which
+  is a guess. Routes-based: the last `/20` of the Pod range (`10.96.0.0/16` gives `10.96.240.0/20`,
+  the example on the routes-based page).
+- **Per-node Pod range.** `/24` on routes-based clusters; on VPC-native ones `31 - ceil(log2(Q))`
+  with `Q` the cluster's `defaultMaxPodsConstraint.maxPodsPerNode` (110 by default, giving `/24`;
+  64 gives `/25`), the formula of the VPC-native page. k3s sizes every node's range alike, so a
+  pool's own `maxPodsConstraint` changes its nodes' maximum Pods but not their range.
+- **Response.** `clusterIpv4Cidr` and `servicesIpv4Cidr` carry the ranges. A VPC-native cluster's
+  `ipAllocationPolicy` is the request's with `useIpAliases: true`, `clusterIpv4Cidr`,
+  `clusterIpv4CidrBlock`, `servicesIpv4Cidr`, `servicesIpv4CidrBlock` filled in and `stackType`
+  defaulting to `IPV4`; a routes-based cluster's is echoed as sent, and `nodeIpv4CidrSize` is set,
+  which the reference says only route-based clusters have.
+- **Runtime.** The k3s server runs with `--cluster-cidr`, `--service-cidr` and the controller
+  manager's `node-cidr-mask-size-ipv4`, so nodes get their `spec.podCIDR` from the Pod range, Pods
+  their addresses from it, the `kubernetes` Service the first Service address (`34.118.224.1`) and
+  `kube-system/kube-dns` (CoreDNS, under the Service name GKE uses) the tenth (`34.118.224.10`),
+  k3s's rule; that GKE's kube-dns takes the tenth address too was not checked in Google docs.
+- **metrics-server.** k3s's bundled metrics-server is kept, so the resource metrics API that GKE's
+  [Horizontal Pod autoscaler](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/horizontalpodautoscaler)
+  queries is served and `kubectl top` works. How GKE deploys its own metrics-server was not checked.
+- **Not modeled.** Named secondary ranges (`clusterSecondaryRangeName`, `servicesSecondaryRangeName`)
+  are not looked up in Compute: give the CIDR too, or the defaults apply. IPv6 and dual-stack,
+  additional Pod ranges and network policy enforcement are stored and echoed only. A Pod range
+  overlapping the Docker networks of the host breaks node traffic. Clusters stored by an earlier
+  floci-gcp build keep running on k3s's own ranges (`10.42.0.0/16`, `10.43.0.0/16`).
+
 ## Supported Operations
 
 - `CreateCluster`, `GetCluster`, `ListClusters`, `DeleteCluster`, `UpdateCluster`, `UpdateMaster`

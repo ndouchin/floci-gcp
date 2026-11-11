@@ -102,6 +102,8 @@ class GkeDockerIntegrationTest {
         docker = lifecycleManager;
         Response create = given().contentType("application/json").body("""
                 {"cluster": {"name": "%s", "initialClusterVersion": "1.35",
+                  "ipAllocationPolicy": {"useIpAliases": true, "clusterIpv4CidrBlock": "10.60.0.0/16"},
+                  "defaultMaxPodsConstraint": {"maxPodsPerNode": "64"},
                   "nodePools": [{"name": "default-pool", "initialNodeCount": 1,
                                  "config": {"machineType": "e2-medium", "labels": {"team": "it"}}}]}}
                 """.formatted(CLUSTER)).post(BASE + "/clusters");
@@ -151,6 +153,25 @@ class GkeDockerIntegrationTest {
 
     @Test
     @Order(3)
+    void appliesThePodAndServiceRangesAndKeepsMetricsServer() throws Exception {
+        Response cluster = given().get(BASE + "/clusters/" + CLUSTER);
+        assertEquals("10.60.0.0/16", cluster.path("clusterIpv4Cidr"));
+        assertEquals("34.118.224.0/20", cluster.path("servicesIpv4Cidr"));
+
+        JsonNode node = nodesOfPool("default-pool").get(0);
+        String podCidr = node.path("spec").path("podCIDR").asText();
+        assertTrue(podCidr.startsWith("10.60.") && podCidr.endsWith("/25"), podCidr);
+        assertEquals("34.118.224.1", kubectl("get", "service", "kubernetes", "-o", "jsonpath={.spec.clusterIP}"));
+        assertEquals("34.118.224.10", kubectl("-n", "kube-system", "get", "service", "kube-dns",
+                "-o", "jsonpath={.spec.clusterIP}"));
+        await("metrics-server APIService Available", () -> "True".equals(kubectlOrEmpty("get", "apiservice",
+                "v1beta1.metrics.k8s.io", "-o", "jsonpath={.status.conditions[?(@.type==\"Available\")].status}")));
+        await("CoreDNS on a Pod address", () -> kubectlOrEmpty("-n", "kube-system", "get", "pods", "-l",
+                "k8s-app=kube-dns", "-o", "jsonpath={.items[0].status.podIP}").startsWith("10.60."));
+    }
+
+    @Test
+    @Order(4)
     void providesGkeStorageClassesAndBindsAVolumeOnTheDefaultOne() throws Exception {
         Map<String, JsonNode> classes = new HashMap<>();
         for (JsonNode sc : JSON.readTree(kubectl("get", "storageclass", "-o", "json")).path("items")) {
@@ -193,7 +214,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(4)
+    @Order(5)
     void resizesPoolsAndAppliesTheirTaints() throws Exception {
         Response resize = given().urlEncodingEnabled(false).contentType("application/json").body("{\"nodeCount\": 2}")
                 .post(BASE + "/clusters/" + CLUSTER + "/nodePools/default-pool:setSize");
@@ -221,7 +242,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(5)
+    @Order(6)
     void gpuPoolsAdvertiseTheirGpusAndCarryGkesGpuTaint() throws Exception {
         Response gpu = given().contentType("application/json").body("""
                 {"nodePool": {"name": "gpu", "initialNodeCount": 1, "config": {
@@ -264,7 +285,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void restoresAStoppedControlPlane() {
         StoredCluster before = stored();
         docker.getDockerClient().stopContainerCmd(before.getContainerId()).withTimeout(5).exec();
@@ -281,7 +302,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void upgradesTheControlPlaneOntoTheNextMinorsImage() {
         Response upgrade = given().urlEncodingEnabled(false).contentType("application/json")
                 .body("{\"masterVersion\": \"1.36\"}")
@@ -306,7 +327,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     void deletingTheClusterRemovesItsContainersVolumesAndNetwork() {
         StoredCluster before = stored();
         List<String> volumes = new ArrayList<>();
@@ -337,6 +358,11 @@ class GkeDockerIntegrationTest {
         ContainerLifecycleManager.ExecResult result = clusterManager.kubectl(stored(), List.of(args));
         assertEquals(0, result.exitCode(), result.stderr());
         return result.stdout();
+    }
+
+    private String kubectlOrEmpty(String... args) {
+        ContainerLifecycleManager.ExecResult result = clusterManager.kubectl(stored(), List.of(args));
+        return result == null || result.exitCode() != 0 || result.stdout() == null ? "" : result.stdout().trim();
     }
 
     private void kubectlApply(String manifest) {

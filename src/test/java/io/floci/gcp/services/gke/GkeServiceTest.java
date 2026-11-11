@@ -785,6 +785,26 @@ class GkeServiceTest {
     }
 
     @Test
+    void clustersOnTheSameNetworkGetPodRangesThatDoNotOverlap() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "first"));
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "second"));
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "elsewhere", "network", "other"));
+
+        assertEquals("10.0.0.0/14", service.getCluster(PROJECT, LOCATION, "first").getClusterIpv4Cidr());
+        assertEquals("10.4.0.0/14", service.getCluster(PROJECT, LOCATION, "second").getClusterIpv4Cidr());
+        assertEquals("10.0.0.0/14", service.getCluster(PROJECT, LOCATION, "elsewhere").getClusterIpv4Cidr());
+        assertEquals("34.118.224.0/20", service.getCluster(PROJECT, LOCATION, "second").getServicesIpv4Cidr());
+        assertEquals(24, service.getCluster(PROJECT, LOCATION, "second").getNodePodCidrSize());
+    }
+
+    @Test
+    void theDefaultMaximumPodsSizesEachNodesPodRange() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "dense",
+                "defaultMaxPodsConstraint", Map.of("maxPodsPerNode", "32")));
+        assertEquals(26, service.getCluster(PROJECT, LOCATION, "dense").getNodePodCidrSize());
+    }
+
+    @Test
     void extraConfigRoundTripsUnknownClusterFieldsFromCreation() {
         // ip_allocation_policy / private_cluster_config / workload_identity_config style blocks:
         // the emulator doesn't act on them, but must echo them back unchanged.

@@ -403,6 +403,13 @@ public class GkeClusterManager {
         if (cluster.getServerIp() != null) {
             serverArgs.add("--advertise-address=" + cluster.getServerIp());
         }
+        if (cluster.getClusterIpv4Cidr() != null && cluster.getServicesIpv4Cidr() != null) {
+            serverArgs.add("--cluster-cidr=" + cluster.getClusterIpv4Cidr());
+            serverArgs.add("--service-cidr=" + cluster.getServicesIpv4Cidr());
+            if (cluster.getNodePodCidrSize() > 0) {
+                serverArgs.add("--kube-controller-manager-arg=node-cidr-mask-size-ipv4=" + cluster.getNodePodCidrSize());
+            }
+        }
 
         // Wire a token-authentication webhook so the bearer token from gke-gcloud-auth-plugin
         // (i.e. `gcloud container clusters get-credentials` + kubectl) is validated by floci-gcp
@@ -828,6 +835,12 @@ public class GkeClusterManager {
             return containerName + ":" + K3S_API_SERVER_PORT;
         }
         return "localhost:" + hostPort;
+    }
+
+    /** The IPv4 address clusters reach floci-gcp on, when it is one rather than a host name. */
+    public Optional<String> emulatorAddress() {
+        String host = dockerHostResolver.resolve();
+        return host != null && host.matches("^\\d{1,3}(\\.\\d{1,3}){3}$") ? Optional.of(host) : Optional.empty();
     }
 
     /** floci-gcp's GKE token-webhook URL, reachable from inside the k3s container. */
