@@ -450,7 +450,14 @@ public class KubernetesController {
         if (cluster.getExtraConfig() != null) {
             result.putAll(cluster.getExtraConfig());
         }
+        result.remove("workloadIdentityConfig");
         result.put("name", cluster.getName());
+        if (cluster.getId() != null) {
+            result.put("id", cluster.getId());
+        }
+        if (cluster.getWorkloadPool() != null) {
+            result.put("workloadIdentityConfig", Map.of("workloadPool", cluster.getWorkloadPool()));
+        }
         if (cluster.getDescription() != null) {
             result.put("description", cluster.getDescription());
         }

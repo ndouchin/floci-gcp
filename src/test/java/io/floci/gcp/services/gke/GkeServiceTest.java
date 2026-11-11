@@ -825,20 +825,98 @@ class GkeServiceTest {
 
     @Test
     void extraConfigRoundTripsUnknownClusterFieldsFromCreation() {
-        // ip_allocation_policy / private_cluster_config / workload_identity_config style blocks:
-        // the emulator doesn't act on them, but must echo them back unchanged.
+        // ip_allocation_policy / private_cluster_config style blocks: the emulator doesn't act on
+        // them, but must echo them back unchanged.
         service.createCluster(PROJECT, LOCATION, Map.of(
                 "name", "full-config",
                 "ipAllocationPolicy", Map.of("useIpAliases", true, "clusterSecondaryRangeName", "pods"),
-                "privateClusterConfig", Map.of("enablePrivateNodes", true),
-                "workloadIdentityConfig", Map.of("workloadPool", "test-project.svc.id.goog")));
+                "privateClusterConfig", Map.of("enablePrivateNodes", true)));
 
         StoredCluster cluster = service.getCluster(PROJECT, LOCATION, "full-config");
         assertEquals(true, ((Map<?, ?>) cluster.getExtraConfig().get("ipAllocationPolicy")).get("useIpAliases"));
         assertEquals(true, ((Map<?, ?>) cluster.getExtraConfig().get("privateClusterConfig"))
                 .get("enablePrivateNodes"));
-        assertEquals("test-project.svc.id.goog",
-                ((Map<?, ?>) cluster.getExtraConfig().get("workloadIdentityConfig")).get("workloadPool"));
+    }
+
+    @Test
+    void theProjectsWorkloadPoolIsATypedClusterField() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "wi",
+                "workloadIdentityConfig", Map.of("workloadPool", PROJECT + ".svc.id.goog")));
+
+        StoredCluster cluster = service.getCluster(PROJECT, LOCATION, "wi");
+        assertEquals(PROJECT + ".svc.id.goog", cluster.getWorkloadPool());
+        assertFalse(cluster.getExtraConfig().containsKey("workloadIdentityConfig"));
+    }
+
+    @Test
+    void anotherProjectsWorkloadPoolIsRejected() {
+        GcpException e = assertThrows(GcpException.class, () -> service.createCluster(PROJECT, LOCATION,
+                Map.of("name", "wi", "workloadIdentityConfig", Map.of("workloadPool", "other-project.svc.id.goog"))));
+        assertEquals(400, e.getHttpStatus());
+        assertThrows(GcpException.class, () -> service.getCluster(PROJECT, LOCATION, "wi"));
+    }
+
+    @Test
+    void desiredWorkloadIdentityConfigEnablesThenDisablesWorkloadIdentity() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "later"));
+        assertNull(service.getCluster(PROJECT, LOCATION, "later").getWorkloadPool());
+
+        service.updateCluster(PROJECT, LOCATION, "later",
+                Map.of("desiredWorkloadIdentityConfig", Map.of("workloadPool", PROJECT + ".svc.id.goog")));
+        assertEquals(PROJECT + ".svc.id.goog", service.getCluster(PROJECT, LOCATION, "later").getWorkloadPool());
+
+        service.updateCluster(PROJECT, LOCATION, "later",
+                Map.of("desiredWorkloadIdentityConfig", Map.of("workloadPool", "")));
+        StoredCluster disabled = service.getCluster(PROJECT, LOCATION, "later");
+        assertNull(disabled.getWorkloadPool());
+        assertFalse(disabled.getExtraConfig().containsKey("workloadIdentityConfig"));
+
+        assertThrows(GcpException.class, () -> service.updateCluster(PROJECT, LOCATION, "later",
+                Map.of("desiredWorkloadIdentityConfig", Map.of("workloadPool", "elsewhere.svc.id.goog"))));
+        assertNull(service.getCluster(PROJECT, LOCATION, "later").getWorkloadPool());
+    }
+
+    @Test
+    void theV1beta1IdentityNamespaceNamesTheWorkloadPool() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "beta",
+                "workloadIdentityConfig", Map.of("identityNamespace", PROJECT + ".svc.id.goog")));
+        assertEquals(PROJECT + ".svc.id.goog", service.getCluster(PROJECT, LOCATION, "beta").getWorkloadPool());
+    }
+
+    @Test
+    void autopilotClustersAlwaysHaveTheProjectsWorkloadPool() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "auto", "autopilot", Map.of("enabled", true)));
+        assertEquals(PROJECT + ".svc.id.goog", service.getCluster(PROJECT, LOCATION, "auto").getWorkloadPool());
+    }
+
+    @Test
+    void everyClusterHasAStableId() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "one"));
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "two"));
+
+        String id = service.getCluster(PROJECT, LOCATION, "one").getId();
+        assertTrue(id.matches("^[0-9a-f]{64}$"), id);
+        assertEquals(id, service.getCluster(PROJECT, LOCATION, "one").getId());
+        assertNotEquals(id, service.getCluster(PROJECT, LOCATION, "two").getId());
+    }
+
+    @Test
+    void clustersStoredBeforeTheTypedFieldsGetAnIdAndTheirEchoedWorkloadPool() {
+        StoredCluster legacy = new StoredCluster();
+        legacy.setName("legacy");
+        legacy.setProject(PROJECT);
+        legacy.setLocation(LOCATION);
+        legacy.setStatus("RUNNING");
+        legacy.setExtraConfig(new HashMap<>(Map.of("workloadIdentityConfig",
+                Map.of("workloadPool", PROJECT + ".svc.id.goog"))));
+        clusterStore.put("projects/" + PROJECT + "/locations/" + LOCATION + "/clusters/legacy", legacy);
+
+        service.init();
+
+        StoredCluster cluster = service.getCluster(PROJECT, LOCATION, "legacy");
+        assertEquals(PROJECT + ".svc.id.goog", cluster.getWorkloadPool());
+        assertFalse(cluster.getExtraConfig().containsKey("workloadIdentityConfig"));
+        assertTrue(cluster.getId().matches("^[0-9a-f]{64}$"));
     }
 
     @Test

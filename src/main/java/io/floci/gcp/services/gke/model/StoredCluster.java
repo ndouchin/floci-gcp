@@ -64,6 +64,10 @@ public class StoredCluster {
     private String etag;
     private List<Map<String, Object>> conditions;
     private Map<String, Object> extraConfig;
+    /** {@code Cluster.id}, output only. */
+    private String id;
+    /** {@code workloadIdentityConfig.workloadPool}; null when Workload Identity is disabled. */
+    private String workloadPool;
 
     // Emulator-internal (real mode only)
     private String containerId;
@@ -142,6 +146,8 @@ public class StoredCluster {
         this.networkGateway = other.networkGateway;
         this.serverIp = other.serverIp;
         this.nodesOutOfDate = other.nodesOutOfDate;
+        this.id = other.id;
+        this.workloadPool = other.workloadPool;
     }
 
     public String getName() {
@@ -486,5 +492,21 @@ public class StoredCluster {
 
     public void setNodesOutOfDate(boolean nodesOutOfDate) {
         this.nodesOutOfDate = nodesOutOfDate;
+    }
+
+    public String getId() {
+        return id;
+    }
+
+    public void setId(String id) {
+        this.id = id;
+    }
+
+    public String getWorkloadPool() {
+        return workloadPool;
+    }
+
+    public void setWorkloadPool(String workloadPool) {
+        this.workloadPool = workloadPool;
     }
 }

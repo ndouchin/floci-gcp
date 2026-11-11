@@ -32,6 +32,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -68,7 +69,7 @@ public class GkeService {
     private static final List<String> TYPED_CLUSTER_FIELDS = List.of(
             "name", "description", "initialClusterVersion", "network", "subnetwork",
             "clusterIpv4Cidr", "locations", "resourceLabels", "loggingService", "monitoringService",
-            "nodePools", "initialNodeCount", "nodeConfig");
+            "nodePools", "initialNodeCount", "nodeConfig", "workloadIdentityConfig", "id");
 
     private final StorageBackend<String, StoredCluster> clusterStore;
     private final StorageBackend<String, StoredNodePool> nodePoolStore;
@@ -157,6 +158,7 @@ public class GkeService {
     @PostConstruct
     public void init() {
         migrateEmbeddedNodePools();
+        backfillTypedClusterFields();
         refreshPersistedNodeVersionAggregates();
         if (!mock()) {
             poller.schedule(this::restoreRuntime, 1, TimeUnit.SECONDS);
@@ -307,6 +309,32 @@ public class GkeService {
         }
     }
 
+    /** Clusters stored before {@code id} and the workload pool were typed: an id, and the pool echoed from {@code extraConfig}. */
+    private void backfillTypedClusterFields() {
+        for (StoredCluster cluster : clusterStore.scan(k -> true)) {
+            if (cluster.getName() == null || cluster.getProject() == null || cluster.getLocation() == null) {
+                continue;
+            }
+            boolean changed = false;
+            if (cluster.getId() == null) {
+                cluster.setId(newClusterId());
+                changed = true;
+            }
+            if (cluster.getExtraConfig() != null && cluster.getExtraConfig().containsKey("workloadIdentityConfig")) {
+                Object echoed = cluster.getExtraConfig().get("workloadIdentityConfig");
+                if (cluster.getWorkloadPool() == null && echoed instanceof Map<?, ?> m
+                        && m.get("workloadPool") instanceof String pool && !pool.isBlank()) {
+                    cluster.setWorkloadPool(pool);
+                }
+                putExtraConfig(cluster, "workloadIdentityConfig", null);
+                changed = true;
+            }
+            if (changed) {
+                clusterStore.put(clusterKey(cluster.getProject(), cluster.getLocation(), cluster.getName()), cluster);
+            }
+        }
+    }
+
     @PreDestroy
     public void shutdown() {
         poller.shutdownNow();
@@ -346,11 +374,17 @@ public class GkeService {
         String masterVersion = requestedVersion == null ? GkeReleases.defaultRelease(channel).gkeVersion()
                 : resolveVersion("initialClusterVersion", requestedVersion, "Master", channel);
         validateNodePoolVersions(clusterMap.get("nodePools"), masterVersion, channel);
+        String workloadPool = workloadPool(project, clusterMap.get("workloadIdentityConfig"));
+        if (workloadPool == null && clusterMap.get("autopilot") instanceof Map<?, ?> autopilot
+                && Boolean.TRUE.equals(autopilot.get("enabled"))) {
+            workloadPool = projectWorkloadPool(project);
+        }
         String network = stringField(clusterMap, "network", "default");
         GkeNetworking.Ranges ranges = GkeNetworking.resolve(clusterMap, defaultMaxPods(clusterMap),
                 takenRanges(project, network));
 
         StoredCluster cluster = new StoredCluster();
+        cluster.setId(newClusterId());
         cluster.setName(name);
         cluster.setProject(project);
         cluster.setLocation(location);
@@ -379,6 +413,7 @@ public class GkeService {
         cluster.setSelfLink(clusterSelfLink(project, location, name));
         cluster.setEtag(newFingerprint());
         cluster.setExtraConfig(extraFields(clusterMap, TYPED_CLUSTER_FIELDS));
+        cluster.setWorkloadPool(workloadPool);
         if (!ranges.routesBased()) {
             putExtraConfig(cluster, "ipAllocationPolicy", vpcNativePolicy(clusterMap.get("ipAllocationPolicy"), ranges));
         }
@@ -457,6 +492,44 @@ public class GkeService {
         return taken;
     }
 
+    /**
+     * {@code workloadIdentityConfig.workloadPool}, or the deprecated v1beta1 {@code identityNamespace}, of a create or
+     * update. "Currently, the only accepted workload pool is the workload pool of the Cloud project containing the
+     * cluster" ({@code gcloud container clusters create --workload-pool}); an empty pool disables Workload Identity,
+     * which is how Terraform disables it. Null when disabled.
+     */
+    static String workloadPool(String project, Object config) {
+        if (config == null) {
+            return null;
+        }
+        if (!(config instanceof Map<?, ?> map)) {
+            throw GcpException.invalidArgument("workloadIdentityConfig must be an object");
+        }
+        Object value = map.get("workloadPool") != null ? map.get("workloadPool") : map.get("identityNamespace");
+        if (value == null || "".equals(value)) {
+            return null;
+        }
+        if (!(value instanceof String pool)) {
+            throw GcpException.invalidArgument("workloadIdentityConfig.workloadPool must be a string");
+        }
+        String accepted = projectWorkloadPool(project);
+        if (!accepted.equals(pool)) {
+            throw GcpException.invalidArgument("Invalid workload pool \"" + pool + "\": the only accepted workload pool is \""
+                    + accepted + "\", the workload pool of the cluster's project.");
+        }
+        return pool;
+    }
+
+    static String projectWorkloadPool(String project) {
+        return project + ".svc.id.goog";
+    }
+
+    private String newClusterId() {
+        byte[] bytes = new byte[32];
+        random.nextBytes(bytes);
+        return HexFormat.of().formatHex(bytes);
+    }
+
     private static Map<String, Object> operationError(Status.Code code, String message) {
         return Map.of("code", code.value(), "message", message);
     }
@@ -529,6 +602,9 @@ public class GkeService {
             String desiredMasterVersion = optionalStringField(updateMap, "desiredMasterVersion");
             String desiredLoggingService = optionalStringField(updateMap, "desiredLoggingService");
             String desiredMonitoringService = optionalStringField(updateMap, "desiredMonitoringService");
+            boolean workloadIdentityUpdate = updateMap.containsKey("desiredWorkloadIdentityConfig");
+            String desiredWorkloadPool = workloadIdentityUpdate
+                    ? workloadPool(project, updateMap.get("desiredWorkloadIdentityConfig")) : null;
             List<StoredNodePool> targets = desiredNodeVersion == null ? List.of()
                     : nodeVersionUpdateTargets(project, location, clusterId, updateMap);
             String nodeVersion = desiredNodeVersion == null ? null
@@ -569,6 +645,9 @@ public class GkeService {
             if (desiredMonitoringService != null) {
                 cluster.setMonitoringService(desiredMonitoringService);
             }
+            if (workloadIdentityUpdate) {
+                cluster.setWorkloadPool(desiredWorkloadPool);
+            }
 
             Map<String, Object> stripped = stripPrefix(updateMap, "desired");
             // Already applied above to their typed field — drop so they aren't also duplicated,
@@ -579,6 +658,7 @@ public class GkeService {
             stripped.remove("locations");
             stripped.remove("loggingService");
             stripped.remove("monitoringService");
+            stripped.remove("workloadIdentityConfig");
             mergeExtraConfig(cluster, stripped);
         }
         touch(cluster);
