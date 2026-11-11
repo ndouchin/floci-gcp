@@ -86,4 +86,41 @@ class IamPrincipalResolverTest {
         assertThrows(GcpException.class,
                 () -> resolver.resolve("Bearer " + CredentialTokenService.IMPERSONATED_TOKEN_PREFIX + "missing"));
     }
+
+    @Test
+    void resolvesAFederatedGkeWorkloadTokenWithItsMemberAliases() {
+        WorkloadIdentityPrincipals.Workload workload = new WorkloadIdentityPrincipals.Workload("123456789012",
+                "my-proj.svc.id.goog", "team", "app", "uid-1",
+                "https://container.googleapis.com/v1/projects/my-proj/locations/us-central1/clusters/c1");
+        StoredCredentialToken token = tokenService.mintFederatedToken(workload, NOW.plusSeconds(3600));
+
+        IamPrincipalResolver.Resolution resolution = resolver.resolve("Bearer " + token.getTokenValue());
+
+        assertTrue(token.getTokenValue().startsWith("floci-gcp-federated-"));
+        assertEquals(IamIdentityKind.FLOCI_FEDERATED, resolution.kind());
+        assertEquals("principal://iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/"
+                + "my-proj.svc.id.goog/subject/ns/team/sa/app", resolution.principal().member());
+        assertTrue(resolution.principal().aliases().contains("serviceAccount:my-proj.svc.id.goog[team/app]"));
+        assertFalse(resolution.downscoped());
+    }
+
+    @Test
+    void unknownAndExpiredFederatedTokensFailLikeOtherFlociTokens() {
+        WorkloadIdentityPrincipals.Workload workload = new WorkloadIdentityPrincipals.Workload("1", "p.svc.id.goog",
+                "ns", "sa", "uid", "https://container.googleapis.com/v1/projects/p/locations/l/clusters/c");
+        StoredCredentialToken expiring = tokenService.mintFederatedToken(workload, NOW.plusSeconds(1));
+        CredentialTokenService later = new CredentialTokenService(storeOf(expiring),
+                Clock.fixed(NOW.plusSeconds(10), ZoneOffset.UTC));
+
+        assertThrows(GcpException.class,
+                () -> resolver.resolve("Bearer " + CredentialTokenService.FEDERATED_TOKEN_PREFIX + "missing"));
+        assertThrows(GcpException.class,
+                () -> new IamPrincipalResolver(later).resolve("Bearer " + expiring.getTokenValue()));
+    }
+
+    private static InMemoryStorage<String, StoredCredentialToken> storeOf(StoredCredentialToken token) {
+        InMemoryStorage<String, StoredCredentialToken> store = new InMemoryStorage<>();
+        store.put(token.getTokenValue(), token);
+        return store;
+    }
 }

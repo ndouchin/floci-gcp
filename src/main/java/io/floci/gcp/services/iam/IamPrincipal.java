@@ -1,9 +1,18 @@
 package io.floci.gcp.services.iam;
 
-/** Canonical principal identity used for IAM allow-binding membership checks. */
-public record IamPrincipal(String member) {
+import java.util.Set;
+
+/**
+ * Canonical principal identity used for IAM allow-binding membership checks: its member string, plus the other member
+ * strings IAM treats as the same identity (a GKE workload is named five ways).
+ */
+public record IamPrincipal(String member, Set<String> aliases) {
 
     private static final IamPrincipal ANONYMOUS = new IamPrincipal(null);
+
+    public IamPrincipal(String member) {
+        this(member, Set.of());
+    }
 
     public static IamPrincipal anonymous() {
         return ANONYMOUS;
@@ -24,5 +33,6 @@ public record IamPrincipal(String member) {
         if (member != null && member.isBlank()) {
             throw new IllegalArgumentException("principal member must not be blank");
         }
+        aliases = aliases == null ? Set.of() : Set.copyOf(aliases);
     }
 }

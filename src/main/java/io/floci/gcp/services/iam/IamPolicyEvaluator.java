@@ -48,7 +48,8 @@ public class IamPolicyEvaluator {
     public static boolean matchesPrincipal(IamPrincipal principal, IamBinding binding) {
         return binding.members().contains("allUsers")
                 || (principal.isAuthenticated() && binding.members().contains("allAuthenticatedUsers"))
-                || (principal.member() != null && binding.members().contains(principal.member()));
+                || (principal.member() != null && binding.members().contains(principal.member()))
+                || principal.aliases().stream().anyMatch(binding.members()::contains);
     }
 
     private static boolean isValidForEvaluation(IamPolicy policy, IamBinding binding) {
