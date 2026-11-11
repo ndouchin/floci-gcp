@@ -502,6 +502,25 @@ class GkeServiceTest {
     }
 
     @Test
+    void aPoolCreatedWhileTheNodesAreReconciledGetsItsNodes() {
+        runRealCluster("racing-pool", Map.of("initialNodeCount", 1));
+        when(clusterManager.readToken(any())).thenAnswer(inv -> {
+            if (service.listNodePools(PROJECT, "us-central1-a", "racing-pool").size() == 1) {
+                service.createNodePool(PROJECT, "us-central1-a", "racing-pool",
+                        Map.of("name", "late", "initialNodeCount", 1));
+            }
+            return "K10token::server:secret";
+        });
+        service.setNodePoolSize(PROJECT, "us-central1-a", "racing-pool", "default-pool", Map.of("nodeCount", 2));
+
+        service.pollReadiness();
+        assertEquals("PROVISIONING", service.getNodePool(PROJECT, "us-central1-a", "racing-pool", "late").getStatus());
+
+        service.pollReadiness();
+        assertEquals(1, service.getNodePool(PROJECT, "us-central1-a", "racing-pool", "late").getNodes().size());
+    }
+
+    @Test
     void aRestoredClusterAdoptsItsSurvivingNodes() {
         runRealCluster("survivor-nodes", Map.of("initialNodeCount", 1));
         service.pollReadiness();

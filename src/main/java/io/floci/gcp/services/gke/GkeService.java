@@ -87,6 +87,9 @@ public class GkeService {
     /** Clusters whose control plane container is being recreated; the readiness poller leaves them
      * alone until the new container is recorded, since the old one is gone by design. */
     private final Set<String> replacingControlPlanes = ConcurrentHashMap.newKeySet();
+    /** How many times each cluster's nodes were put out of date, so a reconcile pass that started before
+     * the latest change leaves them out of date. Guarded by {@link #lifecycleLock}. */
+    private final Map<String, Long> nodeChanges = new HashMap<>();
     private final SecureRandom random = new SecureRandom();
     /** Create operations whose cluster has an unreadable {@code createTime}, already logged once. */
     private final Set<String> unreadableCreateTimes = ConcurrentHashMap.newKeySet();
@@ -203,7 +206,7 @@ public class GkeService {
                             operationError(Status.Code.INTERNAL, failure));
                     LOG.warnv("GKE cluster {0}: {1}", cluster.getName(), failure);
                 } else {
-                    current.setNodesOutOfDate(true);
+                    markNodesOutOfDate(current);
                     if (!"PROVISIONING".equals(current.getStatus())) {
                         current.setStatus("RECONCILING");
                         current.setReconcileSince(Instant.now().toString());
@@ -912,7 +915,7 @@ public class GkeService {
             }
             nodePoolStore.put(nodePoolKey(project, location, clusterId, pool.getName()), pool);
             clusterStore.get(clusterKey).ifPresent(cluster -> {
-                cluster.setNodesOutOfDate(true);
+                markNodesOutOfDate(cluster);
                 clusterStore.put(clusterKey, cluster);
             });
         }
@@ -930,7 +933,7 @@ public class GkeService {
             nodePoolStore.put(nodePoolKey(project, location, clusterId, pool.getName()), pool);
         }
         if (!mock()) {
-            cluster.setNodesOutOfDate(true);
+            markNodesOutOfDate(cluster);
         }
     }
 
@@ -963,7 +966,7 @@ public class GkeService {
                 removeNodes(clusterStore.get(clusterKey).orElse(null), doomed.getNodes());
                 nodePoolStore.delete(key);
                 clusterStore.get(clusterKey).ifPresent(cluster -> {
-                    cluster.setNodesOutOfDate(true);
+                    markNodesOutOfDate(cluster);
                     clusterStore.put(clusterKey, cluster);
                 });
             }
@@ -1424,6 +1427,19 @@ public class GkeService {
         return clusterLocks.computeIfAbsent(clusterKey, k -> new Object());
     }
 
+    private void markNodesOutOfDate(StoredCluster cluster) {
+        synchronized (lifecycleLock) {
+            cluster.setNodesOutOfDate(true);
+            nodeChanges.merge(clusterKey(cluster.getProject(), cluster.getLocation(), cluster.getName()), 1L, Long::sum);
+        }
+    }
+
+    private long nodeChanges(String clusterKey) {
+        synchronized (lifecycleLock) {
+            return nodeChanges.getOrDefault(clusterKey, 0L);
+        }
+    }
+
     /** Node pools in the order the node cap serves them: the default pool first, then by creation. */
     private List<StoredNodePool> orderedPools(String project, String location, String clusterId) {
         return listNodePools(project, location, clusterId).stream()
@@ -1448,8 +1464,12 @@ public class GkeService {
             if (cluster == null || !"RUNNING".equals(cluster.getStatus())) {
                 return;
             }
+            long changes = nodeChanges(key);
             List<StoredNodePool> pools = orderedPools(project, location, clusterId);
-            if (cluster.isNodesOutOfDate() && !applyNodePlan(cluster, pools)) {
+            if (cluster.isNodesOutOfDate() && !applyNodePlan(cluster, pools, changes)) {
+                return;
+            }
+            if (clusterStore.get(key).map(StoredCluster::isNodesOutOfDate).orElse(true)) {
                 return;
             }
             settleNodePools(cluster, orderedPools(project, location, clusterId));
@@ -1458,7 +1478,7 @@ public class GkeService {
 
     /** Creates, adopts and removes node containers so each pool runs its share of the node cap. False
      * when the control plane cannot hand out its join token yet. */
-    private boolean applyNodePlan(StoredCluster cluster, List<StoredNodePool> pools) {
+    private boolean applyNodePlan(StoredCluster cluster, List<StoredNodePool> pools, long changes) {
         String project = cluster.getProject();
         String location = cluster.getLocation();
         String clusterId = cluster.getName();
@@ -1506,7 +1526,7 @@ public class GkeService {
         synchronized (lifecycleLock) {
             clusterStore.get(key).ifPresent(current -> {
                 current.setK3sToken(token);
-                current.setNodesOutOfDate(false);
+                current.setNodesOutOfDate(nodeChanges(key) != changes);
                 clusterStore.put(key, current);
             });
         }
