@@ -19,6 +19,7 @@ final class GkeNodes {
 
     static final String DEFAULT_POOL = "default-pool";
     static final int DEFAULT_MAX_PODS = 110;
+    static final String GPU_TAINT = "nvidia.com/gpu=present:NoSchedule";
     private static final Pattern ZONE = Pattern.compile("^[a-z]+-[a-z]+\\d+-[a-z]$");
     private static final int MAX_NAME_LENGTH = 63;
     private static final int EVICTION_MB = 100;
@@ -154,10 +155,11 @@ final class GkeNodes {
      * allocatable CPU and memory are its machine type's (when the Docker host is big enough).
      */
     static NodeSpec spec(String project, String pool, String zone, String nodeName, Map<String, Object> config,
-                         int maxPods, int hostCpus, long hostMemoryBytes) {
+                         int maxPods, boolean gpuTaint, int hostCpus, long hostMemoryBytes) {
         Map<String, Object> cfg = config == null ? Map.of() : config;
         String machineType = stringValue(cfg.get("machineType"), GkeMachineTypes.DEFAULT_MACHINE_TYPE);
         GkeMachineTypes.Shape shape = GkeMachineTypes.shape(machineType).orElse(null);
+        Accelerator accelerator = accelerator(cfg);
 
         Map<String, String> labels = new LinkedHashMap<>();
         labels.put("cloud.google.com/gke-boot-disk", stringValue(cfg.get("diskType"), "pd-balanced"));
@@ -181,11 +183,17 @@ final class GkeNodes {
         labels.put("node.kubernetes.io/instance-type", machineType);
         labels.put("topology.kubernetes.io/region", region(zone));
         labels.put("topology.kubernetes.io/zone", zone);
+        if (accelerator != null) {
+            labels.put("cloud.google.com/gke-accelerator", accelerator.type());
+        }
         if (cfg.get("labels") instanceof Map<?, ?> userLabels) {
             userLabels.forEach((k, v) -> labels.put(String.valueOf(k), String.valueOf(v)));
         }
 
         List<String> taints = new ArrayList<>();
+        if (accelerator != null && gpuTaint) {
+            taints.add(GPU_TAINT);
+        }
         if (cfg.get("taints") instanceof List<?> configured) {
             for (Object entry : configured) {
                 if (entry instanceof Map<?, ?> taint && taint.get("key") instanceof String key) {
@@ -206,7 +214,34 @@ final class GkeNodes {
             memoryBytes = shape.memoryMb() * 1024L * 1024L;
             kubeletArgs.add(kubeReserved(shape, hostCpus, hostMemoryBytes));
         }
-        return new NodeSpec(labels, taints, kubeletArgs, cpus, memoryBytes, null, 0);
+        return new NodeSpec(labels, taints, kubeletArgs, cpus, memoryBytes,
+                accelerator == null ? null : accelerator.type(), accelerator == null ? 0 : accelerator.count());
+    }
+
+    private record Accelerator(String type, int count) {
+    }
+
+    /** The GPUs a pool's nodes get: {@code config.accelerators}, else those its machine type comes with. */
+    private static Accelerator accelerator(Map<String, Object> cfg) {
+        if (cfg.get("accelerators") instanceof List<?> accelerators) {
+            for (Object entry : accelerators) {
+                if (entry instanceof Map<?, ?> attached && attached.get("acceleratorType") instanceof String type
+                        && !type.isBlank()) {
+                    int count = intValue(attached.get("acceleratorCount"), 1);
+                    if (count > 0) {
+                        return new Accelerator(type, count);
+                    }
+                }
+            }
+        }
+        return GkeMachineTypes.shape(stringValue(cfg.get("machineType"), GkeMachineTypes.DEFAULT_MACHINE_TYPE))
+                .filter(GkeMachineTypes.Shape::hasGpus)
+                .map(shape -> new Accelerator(shape.acceleratorType(), shape.acceleratorCount()))
+                .orElse(null);
+    }
+
+    static boolean hasGpus(Map<String, Object> config) {
+        return accelerator(config == null ? Map.of() : config) != null;
     }
 
     /**

@@ -24,7 +24,6 @@ final class GkeMachineTypes {
     }
 
     private static final Pattern GENERAL = Pattern.compile("^([a-z][a-z0-9]*)-(standard|highmem|highcpu)-(\\d+)$");
-    private static final Pattern ACCELERATOR = Pattern.compile("^(a2|a3|a4)-(highgpu|megagpu|ultragpu)-(\\d+)g$");
     private static final Map<String, Shape> FIXED = fixedShapes();
 
     private GkeMachineTypes() {
@@ -91,6 +90,10 @@ final class GkeMachineTypes {
         gpu(shapes, "a3-megagpu-8g", 208, 1872, "nvidia-h100-mega-80gb", 8);
         gpu(shapes, "a3-ultragpu-8g", 224, 2952, "nvidia-h200-141gb", 8);
         gpu(shapes, "a4-highgpu-8g", 224, 3968, "nvidia-b200", 8);
+        gpu(shapes, "g4-standard-48", 48, 180, "nvidia-rtx-pro-6000", 1);
+        gpu(shapes, "g4-standard-96", 96, 360, "nvidia-rtx-pro-6000", 2);
+        gpu(shapes, "g4-standard-192", 192, 720, "nvidia-rtx-pro-6000", 4);
+        gpu(shapes, "g4-standard-384", 384, 1440, "nvidia-rtx-pro-6000", 8);
         return shapes;
     }
 
@@ -100,9 +103,6 @@ final class GkeMachineTypes {
 
     private static void gpu(Map<String, Shape> shapes, String name, int cpus, int memoryGb, String accelerator,
                             int count) {
-        if (!ACCELERATOR.matcher(name).matches()) {
-            throw new IllegalStateException("Unexpected accelerator-optimized machine type " + name);
-        }
         shapes.put(name, new Shape(name, family(name), cpus, memoryGb * 1024, false, accelerator, count));
     }
 }

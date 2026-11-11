@@ -649,6 +649,15 @@ public class GkeClusterManager {
         kubectl(cluster, secrets);
     }
 
+    /**
+     * Advertises a node's GPUs as the {@code nvidia.com/gpu} extended resource, which the GPU device
+     * plugin does on a GKE node. The kubelet keeps a capacity it does not manage across restarts.
+     */
+    public void setGpuCapacity(StoredCluster cluster, String nodeName, int gpus) {
+        kubectl(cluster, List.of("patch", "node", nodeName, "--subresource=status", "--type=merge", "-p",
+                "{\"status\":{\"capacity\":{\"nvidia.com/gpu\":\"" + gpus + "\"}}}"));
+    }
+
     /** Overwrites labels on a registered node, for those the k3s cloud controller rewrites at registration. */
     public void labelNode(StoredCluster cluster, String nodeName, Map<String, String> labels) {
         if (labels.isEmpty()) {

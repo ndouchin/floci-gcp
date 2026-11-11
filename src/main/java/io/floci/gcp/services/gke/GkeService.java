@@ -1140,6 +1140,8 @@ public class GkeService {
         pool.setMaxPodsConstraint(asMap(poolMap.get("maxPodsConstraint")));
         pool.setConditions(List.of());
         pool.setConfig(asMap(poolMap.get("config")));
+        pool.setGpuTaint(GkeNodes.hasGpus(pool.getConfig()) && listNodePools(project, location, clusterId).stream()
+                .anyMatch(other -> !GkeNodes.hasGpus(other.getConfig())));
         pool.setAutoscaling(asMap(poolMap.get("autoscaling")));
         pool.setManagement(asMap(poolMap.get("management")));
         pool.setUpgradeSettings(asMap(poolMap.get("upgradeSettings")));
@@ -1495,7 +1497,7 @@ public class GkeService {
                 StoredNode node = new StoredNode(GkeNodes.nodeName(cluster.getName(), pool.getName(), hash,
                         uniqueSuffix(pool)), zone);
                 GkeNodes.NodeSpec spec = GkeNodes.spec(cluster.getProject(), pool.getName(), zone, node.getName(),
-                        pool.getConfig(), maxPods(cluster, pool), host.cpus(), host.memoryBytes());
+                        pool.getConfig(), maxPods(cluster, pool), pool.isGpuTaint(), host.cpus(), host.memoryBytes());
                 pool.getNodes().add(node);
                 try {
                     clusterManager.startNode(cluster, node, new GkeClusterManager.NodeLaunch(pool.getName(), image, spec));
@@ -1614,16 +1616,20 @@ public class GkeService {
                 ready = false;
                 continue;
             }
-            Map<String, String> expected = GkeNodes.spec(cluster.getProject(), pool.getName(), node.getZone(),
-                    node.getName(), pool.getConfig(), maxPods(cluster, pool), 0, 0).labels();
+            GkeNodes.NodeSpec spec = GkeNodes.spec(cluster.getProject(), pool.getName(), node.getZone(),
+                    node.getName(), pool.getConfig(), maxPods(cluster, pool), pool.isGpuTaint(), 0, 0);
             Map<String, String> drifted = new HashMap<>();
-            expected.forEach((k, v) -> {
+            spec.labels().forEach((k, v) -> {
                 if (!v.equals(state.labels().get(k))) {
                     drifted.put(k, v);
                 }
             });
             if (!drifted.isEmpty()) {
                 clusterManager.labelNode(cluster, node.getName(), drifted);
+            }
+            if (spec.acceleratorCount() != state.gpuCapacity()) {
+                clusterManager.setGpuCapacity(cluster, node.getName(), spec.acceleratorCount());
+                ready = false;
             }
         }
         return ready;

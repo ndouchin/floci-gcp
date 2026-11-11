@@ -537,6 +537,45 @@ class GkeServiceTest {
     }
 
     @Test
+    void aGpuPoolAddedNextToACpuPoolIsTaintedAndAdvertisesItsGpus() {
+        runRealCluster("gpus", Map.of("initialNodeCount", 1));
+        service.createNodePool(PROJECT, "us-central1-a", "gpus", Map.of("name", "t4", "initialNodeCount", 1,
+                "config", Map.of("machineType", "n1-standard-4",
+                        "accelerators", List.of(Map.of("acceleratorType", "nvidia-tesla-t4", "acceleratorCount", 1)))));
+        assertTrue(service.getNodePool(PROJECT, "us-central1-a", "gpus", "t4").isGpuTaint());
+        assertFalse(service.getNodePool(PROJECT, "us-central1-a", "gpus", "default-pool").isGpuTaint());
+        service.pollReadiness();
+
+        StoredNode gpuNode = service.getNodePool(PROJECT, "us-central1-a", "gpus", "t4").getNodes().get(0);
+        Map<String, GkeClusterManager.NodeState> states = new HashMap<>();
+        for (StoredNodePool pool : service.listNodePools(PROJECT, "us-central1-a", "gpus")) {
+            for (StoredNode node : pool.getNodes()) {
+                states.put(node.getName(), new GkeClusterManager.NodeState(true, Map.of(), 0));
+            }
+        }
+        when(clusterManager.nodeStates(any())).thenReturn(states);
+        service.pollReadiness();
+
+        verify(clusterManager).setGpuCapacity(any(), org.mockito.ArgumentMatchers.eq(gpuNode.getName()),
+                org.mockito.ArgumentMatchers.eq(1));
+        assertEquals("PROVISIONING", service.getNodePool(PROJECT, "us-central1-a", "gpus", "t4").getStatus());
+
+        states.put(gpuNode.getName(), new GkeClusterManager.NodeState(true, Map.of(), 1));
+        service.pollReadiness();
+        assertEquals("RUNNING", service.getNodePool(PROJECT, "us-central1-a", "gpus", "t4").getStatus());
+    }
+
+    @Test
+    void aClusterWhoseOnlyPoolHasGpusLeavesItUntainted() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "gpu-only",
+                "nodeConfig", Map.of("machineType", "g2-standard-4")));
+        assertFalse(service.getNodePool(PROJECT, LOCATION, "gpu-only", "default-pool").isGpuTaint());
+        service.createNodePool(PROJECT, LOCATION, "gpu-only", Map.of("name", "more-gpus",
+                "config", Map.of("machineType", "a2-highgpu-1g")));
+        assertFalse(service.getNodePool(PROJECT, LOCATION, "gpu-only", "more-gpus").isGpuTaint());
+    }
+
+    @Test
     void createClusterRejectsMissingName() {
         assertThrows(GcpException.class,
                 () -> service.createCluster(PROJECT, LOCATION, Map.of()));

@@ -315,6 +315,31 @@ types use the vCPU and memory figures of
 [Accelerator-optimized machines](https://docs.cloud.google.com/compute/docs/accelerator-optimized-machines).
 A machine type the emulator cannot read runs unlimited.
 
+### GPUs
+
+A pool gets GPUs from `config.accelerators` (the first entry with an `acceleratorType` and a
+`acceleratorCount` above zero), or else from its machine type: A2 (`nvidia-tesla-a100`,
+`nvidia-a100-80gb`), A3 (`nvidia-h100-80gb`, `nvidia-h100-mega-80gb`, `nvidia-h200-141gb`), A4
+(`nvidia-b200`), G2 (`nvidia-l4`) and the whole-GPU G4 types (`nvidia-rtx-pro-6000`), with the GPU
+counts of
+[Accelerator-optimized machines](https://docs.cloud.google.com/compute/docs/accelerator-optimized-machines).
+The accelerator names are the ones [Run GPUs in GKE Standard node pools](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/gpus)
+uses. Each node of such a pool:
+
+- carries `cloud.google.com/gke-accelerator=<accelerator type>`, the node selector GKE documents;
+- advertises `nvidia.com/gpu: <count>` in its capacity and allocatable, so pods requesting
+  `nvidia.com/gpu` schedule on it and only up to that count. There is no GPU behind it: the emulator
+  patches the node status where GKE's device plugin would report the devices, and a pod that tries
+  to use CUDA fails;
+- is tainted `nvidia.com/gpu=present:NoSchedule` when the pool is added to a cluster that already
+  has a pool without GPUs, as GKE does. A cluster whose default pool has GPUs, or whose pools all
+  have GPUs, gets no taint, and adding a pool without GPUs later does not taint existing GPU pools
+  (same page). Pools listed in `CreateCluster.nodePools` count as added in list order.
+
+The control plane runs the `ExtendedResourceToleration` admission plugin, as GKE does, so a pod
+requesting `nvidia.com/gpu` gets the matching toleration. GPU partitioning (MIG, time-sharing),
+`gpuDriverInstallationConfig` and fractional G4 types are stored and echoed, not modeled.
+
 ## Storage classes (real mode)
 
 A real cluster comes with the StorageClasses GKE Standard clusters have, and claims on them bind.

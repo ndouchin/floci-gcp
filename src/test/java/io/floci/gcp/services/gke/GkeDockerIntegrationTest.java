@@ -222,6 +222,49 @@ class GkeDockerIntegrationTest {
 
     @Test
     @Order(5)
+    void gpuPoolsAdvertiseTheirGpusAndCarryGkesGpuTaint() throws Exception {
+        Response gpu = given().contentType("application/json").body("""
+                {"nodePool": {"name": "gpu", "initialNodeCount": 1, "config": {
+                  "machineType": "n1-standard-4",
+                  "accelerators": [{"acceleratorType": "nvidia-tesla-t4", "acceleratorCount": "1"}]}}}
+                """).post(BASE + "/clusters/" + CLUSTER + "/nodePools");
+        gpu.then().statusCode(200);
+        awaitOperation(gpu.path("name"));
+
+        JsonNode node = nodesOfPool("gpu").get(0);
+        assertEquals("nvidia-tesla-t4", node.path("metadata").path("labels").path("cloud.google.com/gke-accelerator").asText());
+        assertEquals("1", node.path("status").path("capacity").path("nvidia.com/gpu").asText());
+        JsonNode taint = node.path("spec").path("taints").get(0);
+        assertEquals("nvidia.com/gpu", taint.path("key").asText());
+        assertEquals("present", taint.path("value").asText());
+        assertEquals("NoSchedule", taint.path("effect").asText());
+
+        kubectlApply("""
+                apiVersion: v1
+                kind: Pod
+                metadata: {name: cuda, namespace: default}
+                spec:
+                  containers:
+                  - name: cuda
+                    image: rancher/mirrored-library-busybox:1.37.0
+                    command: ["sleep", "3600"]
+                    resources: {limits: {nvidia.com/gpu: 1}}
+                """);
+        await("GPU pod Running", () -> "Running".equals(kubectl("get", "pod", "cuda", "-o", "jsonpath={.status.phase}")));
+        JsonNode pod = JSON.readTree(kubectl("get", "pod", "cuda", "-o", "json"));
+        assertEquals(node.path("metadata").path("name").asText(), pod.path("spec").path("nodeName").asText());
+        boolean tolerated = false;
+        for (JsonNode toleration : pod.path("spec").path("tolerations")) {
+            tolerated |= "nvidia.com/gpu".equals(toleration.path("key").asText());
+        }
+        assertTrue(tolerated, "ExtendedResourceToleration adds the GPU toleration");
+        kubectl("delete", "pod", "cuda", "--wait=false");
+
+        given().delete(BASE + "/clusters/" + CLUSTER + "/nodePools/gpu").then().statusCode(200);
+    }
+
+    @Test
+    @Order(6)
     void restoresAStoppedControlPlane() {
         StoredCluster before = stored();
         docker.getDockerClient().stopContainerCmd(before.getContainerId()).withTimeout(5).exec();
@@ -238,7 +281,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void upgradesTheControlPlaneOntoTheNextMinorsImage() {
         Response upgrade = given().urlEncodingEnabled(false).contentType("application/json")
                 .body("{\"masterVersion\": \"1.36\"}")
@@ -263,7 +306,7 @@ class GkeDockerIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void deletingTheClusterRemovesItsContainersVolumesAndNetwork() {
         StoredCluster before = stored();
         List<String> volumes = new ArrayList<>();

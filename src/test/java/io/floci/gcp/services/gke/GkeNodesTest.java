@@ -65,7 +65,7 @@ class GkeNodesTest {
                         "labels", Map.of("team", "data"),
                         "taints", List.of(Map.of("key", "dedicated", "value", "data", "effect", "NO_EXECUTE"),
                                 Map.of("key", "soft", "effect", "PREFER_NO_SCHEDULE"))),
-                110, 6, 10 * GIB);
+                110, false, 6, 10 * GIB);
 
         Map<String, String> labels = spec.labels();
         assertEquals("workers", labels.get("cloud.google.com/gke-nodepool"));
@@ -85,12 +85,50 @@ class GkeNodesTest {
         assertEquals(16 * GIB, spec.memoryBytes());
 
         GkeNodes.NodeSpec ubuntuSpot = GkeNodes.spec("p1", "spot", "us-central1-b", "n",
-                Map.of("imageType", "UBUNTU_CONTAINERD", "spot", true), 32, 6, 10 * GIB);
+                Map.of("imageType", "UBUNTU_CONTAINERD", "spot", true), 32, false, 6, 10 * GIB);
         assertEquals("ubuntu", ubuntuSpot.labels().get("cloud.google.com/gke-os-distribution"));
         assertEquals("spot", ubuntuSpot.labels().get("cloud.google.com/gke-provisioning"));
         assertEquals("true", ubuntuSpot.labels().get("cloud.google.com/gke-spot"));
         assertEquals("e2-medium", ubuntuSpot.labels().get("node.kubernetes.io/instance-type"));
         assertTrue(ubuntuSpot.kubeletArgs().contains("max-pods=32"));
+    }
+
+    @Test
+    void gpuNodesCarryTheAcceleratorLabelTheirGpuCountAndGkesTaint() {
+        GkeNodes.NodeSpec attached = GkeNodes.spec("p1", "gpu", "us-central1-a", "n",
+                Map.of("machineType", "n1-standard-4",
+                        "accelerators", List.of(Map.of("acceleratorType", "nvidia-tesla-t4", "acceleratorCount", "2"))),
+                110, true, 6, 10 * GIB);
+        assertEquals("nvidia-tesla-t4", attached.labels().get("cloud.google.com/gke-accelerator"));
+        assertEquals("nvidia-tesla-t4", attached.acceleratorType());
+        assertEquals(2, attached.acceleratorCount());
+        assertEquals(List.of("nvidia.com/gpu=present:NoSchedule"), attached.taints());
+
+        GkeNodes.NodeSpec a3 = GkeNodes.spec("p1", "h100", "us-central1-a", "n",
+                Map.of("machineType", "a3-highgpu-8g"), 110, false, 6, 10 * GIB);
+        assertEquals("nvidia-h100-80gb", a3.labels().get("cloud.google.com/gke-accelerator"));
+        assertEquals(8, a3.acceleratorCount());
+        assertEquals(List.of(), a3.taints());
+        assertEquals("a3", a3.labels().get("cloud.google.com/machine-family"));
+
+        GkeNodes.NodeSpec g2 = GkeNodes.spec("p1", "l4", "us-central1-a", "n",
+                Map.of("machineType", "g2-standard-24"), 110, false, 6, 10 * GIB);
+        assertEquals("nvidia-l4", g2.acceleratorType());
+        assertEquals(2, g2.acceleratorCount());
+
+        GkeNodes.NodeSpec g4 = GkeNodes.spec("p1", "rtx", "us-central1-a", "n",
+                Map.of("machineType", "g4-standard-96"), 110, false, 6, 10 * GIB);
+        assertEquals("nvidia-rtx-pro-6000", g4.acceleratorType());
+        assertEquals(2, g4.acceleratorCount());
+        assertEquals(360L * 1024 * 1024 * 1024, g4.memoryBytes());
+
+        GkeNodes.NodeSpec cpu = GkeNodes.spec("p1", "cpu", "us-central1-a", "n",
+                Map.of("machineType", "e2-standard-4"), 110, true, 6, 10 * GIB);
+        assertEquals(null, cpu.labels().get("cloud.google.com/gke-accelerator"));
+        assertEquals(0, cpu.acceleratorCount());
+        assertEquals(List.of(), cpu.taints());
+        assertTrue(GkeNodes.hasGpus(Map.of("machineType", "a2-highgpu-1g")));
+        assertFalse(GkeNodes.hasGpus(Map.of("machineType", "n2-standard-2")));
     }
 
     @Test
