@@ -11,6 +11,7 @@ import io.floci.gcp.services.gke.model.StoredNode;
 import io.floci.gcp.services.gke.model.StoredNodePool;
 import io.floci.gcp.services.iam.IamServiceAccountAuthorizationAdapter;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationService;
+import io.floci.gcp.services.iam.authorization.IamOperation;
 import io.floci.gcp.services.iamcredentials.IamCredentialsService;
 import io.floci.gcp.services.sts.StsService;
 import org.junit.jupiter.api.BeforeEach;
@@ -153,8 +154,7 @@ class GkeMetadataServiceTest {
 
         String token = json(get(GCE_NODE, "gce", "10.60.2.3",
                 "computeMetadata/v1/instance/service-accounts/default/token")).path("access_token").asText();
-        assertEquals("serviceAccount:nodes@p1.iam.gserviceaccount.com".substring("serviceAccount:".length()),
-                tokens.lookupBearerToken(token).orElseThrow().getPrincipal());
+        assertEquals("nodes@p1.iam.gserviceaccount.com", tokens.lookupBearerToken(token).orElseThrow().getPrincipal());
         verify(workloads, never()).podAt(any(), any(), any());
     }
 
@@ -194,7 +194,7 @@ class GkeMetadataServiceTest {
         podAt("10.60.1.9", Map.of("iam.gke.io/gcp-service-account", "app@p1.iam.gserviceaccount.com"));
         when(authorization.enabled()).thenReturn(true);
         doThrow(GcpException.permissionDenied("denied")).when(authorization).authorize(anyString(), any(),
-                any(io.floci.gcp.services.iam.authorization.IamOperation.class));
+                any(IamOperation.class));
 
         GkeMetadataService.Answer answer = get(WI_NODE, "gke", "10.60.1.9",
                 "computeMetadata/v1/instance/service-accounts/default/token");

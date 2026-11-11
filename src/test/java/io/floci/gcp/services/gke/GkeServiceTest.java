@@ -3,6 +3,8 @@ package io.floci.gcp.services.gke;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.ProjectNumbers;
+import io.floci.gcp.core.common.WorkloadIdentityIssuers;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.gke.model.StoredCluster;
 import io.floci.gcp.services.gke.model.StoredNode;
@@ -33,6 +35,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
@@ -473,18 +479,18 @@ class GkeServiceTest {
 
         service.updateNodePool(PROJECT, "us-central1-a", "relabel", "default-pool",
                 Map.of("workloadMetadataConfig", Map.of("mode", "GCE_METADATA")));
-        verify(clusterManager).unlabelNode(any(), org.mockito.ArgumentMatchers.eq(node),
-                org.mockito.ArgumentMatchers.eq(List.of(GkeNodes.GKE_METADATA_SERVER_LABEL)));
+        verify(clusterManager).unlabelNode(any(), eq(node),
+                eq(List.of(GkeNodes.GKE_METADATA_SERVER_LABEL)));
 
         service.updateNodePool(PROJECT, "us-central1-a", "relabel", "default-pool",
                 Map.of("workloadMetadataConfig", Map.of("mode", "GKE_METADATA")));
-        verify(clusterManager).labelNode(any(), org.mockito.ArgumentMatchers.eq(node),
-                org.mockito.ArgumentMatchers.eq(Map.of(GkeNodes.GKE_METADATA_SERVER_LABEL, "true")));
+        verify(clusterManager).labelNode(any(), eq(node),
+                eq(Map.of(GkeNodes.GKE_METADATA_SERVER_LABEL, "true")));
         verify(clusterManager, times(1)).startNode(any(), any(), any());
-        verify(clusterManager).programMetadataRouting(any(), org.mockito.ArgumentMatchers.argThat(n ->
-                node.equals(n.getName())), org.mockito.ArgumentMatchers.eq(false));
-        verify(clusterManager).programMetadataRouting(any(), org.mockito.ArgumentMatchers.argThat(n ->
-                node.equals(n.getName())), org.mockito.ArgumentMatchers.eq(true));
+        verify(clusterManager).programMetadataRouting(any(), argThat(n ->
+                node.equals(n.getName())), eq(false));
+        verify(clusterManager).programMetadataRouting(any(), argThat(n ->
+                node.equals(n.getName())), eq(true));
     }
 
     @Test
@@ -498,10 +504,10 @@ class GkeServiceTest {
 
         String wi = service.getNodePool(PROJECT, "us-central1-a", "relays", "default-pool").getNodes().get(0).getName();
         String plain = service.getNodePool(PROJECT, "us-central1-a", "relays", "plain").getNodes().get(0).getName();
-        verify(clusterManager, org.mockito.Mockito.atLeastOnce()).ensureMetadataRelay(any(),
-                org.mockito.ArgumentMatchers.argThat(n -> wi.equals(n.getName())), org.mockito.ArgumentMatchers.eq(true));
-        verify(clusterManager, org.mockito.Mockito.atLeastOnce()).ensureMetadataRelay(any(),
-                org.mockito.ArgumentMatchers.argThat(n -> plain.equals(n.getName())), org.mockito.ArgumentMatchers.eq(false));
+        verify(clusterManager, atLeastOnce()).ensureMetadataRelay(any(),
+                argThat(n -> wi.equals(n.getName())), eq(true));
+        verify(clusterManager, atLeastOnce()).ensureMetadataRelay(any(),
+                argThat(n -> plain.equals(n.getName())), eq(false));
         assertNotNull(service.getCluster(PROJECT, "us-central1-a", "relays").getMetadataRelayKey());
     }
 
@@ -512,7 +518,7 @@ class GkeServiceTest {
         service.pollReadiness();
 
         verify(clusterManager, times(1)).startNode(any(), any(), any());
-        verify(clusterManager, never()).ensureMetadataRelay(any(), any(), org.mockito.ArgumentMatchers.anyBoolean());
+        verify(clusterManager, never()).ensureMetadataRelay(any(), any(), anyBoolean());
     }
 
     @Test
@@ -521,12 +527,12 @@ class GkeServiceTest {
         service.pollReadiness();
         markNodesReady("us-central1-a", "watched");
         service.pollReadiness();
-        verify(clusterManager, times(1)).ensureMetadataRelay(any(), any(), org.mockito.ArgumentMatchers.anyBoolean());
+        verify(clusterManager, times(1)).ensureMetadataRelay(any(), any(), anyBoolean());
 
         when(clusterManager.metadataRelayCurrent(any())).thenReturn(false);
         service.watchMetadataRelays(PROJECT, "us-central1-a", "watched");
 
-        verify(clusterManager, times(2)).ensureMetadataRelay(any(), any(), org.mockito.ArgumentMatchers.anyBoolean());
+        verify(clusterManager, times(2)).ensureMetadataRelay(any(), any(), anyBoolean());
     }
 
     @Test
@@ -631,7 +637,7 @@ class GkeServiceTest {
                 .getNodes().get(0);
         assertNotEquals(before, replacement.getName());
         assertEquals("k3s:36", replacement.getImage());
-        verify(clusterManager).deleteKubernetesNodes(any(), org.mockito.ArgumentMatchers.eq(List.of(before)));
+        verify(clusterManager).deleteKubernetesNodes(any(), eq(List.of(before)));
     }
 
     @Test
@@ -708,8 +714,8 @@ class GkeServiceTest {
         when(clusterManager.nodeStates(any())).thenReturn(states);
         service.pollReadiness();
 
-        verify(clusterManager).setGpuCapacity(any(), org.mockito.ArgumentMatchers.eq(gpuNode.getName()),
-                org.mockito.ArgumentMatchers.eq(1));
+        verify(clusterManager).setGpuCapacity(any(), eq(gpuNode.getName()),
+                eq(1));
         assertEquals("PROVISIONING", service.getNodePool(PROJECT, "us-central1-a", "gpus", "t4").getStatus());
 
         states.put(gpuNode.getName(), new GkeClusterManager.NodeState(true, Map.of(), 1));
@@ -1328,7 +1334,7 @@ class GkeServiceTest {
 
         assertEquals("RUNNING", op.getStatus());
         assertEquals(OperationType.UPDATE_CLUSTER, op.getOperationType());
-        verify(clusterManager).replaceControlPlane(org.mockito.ArgumentMatchers.argThat(
+        verify(clusterManager).replaceControlPlane(argThat(
                 StoredCluster::isGkeServiceAccountIssuer));
         StoredCluster moving = service.getCluster(PROJECT, LOCATION, "round-one");
         assertEquals("RECONCILING", moving.getStatus());
@@ -1376,10 +1382,10 @@ class GkeServiceTest {
         String issuer = "https://container.googleapis.com/v1/projects/" + PROJECT + "/locations/" + LOCATION
                 + "/clusters/provider";
 
-        io.floci.gcp.core.common.WorkloadIdentityIssuers.Provider provider = issuers.provider(issuer).orElseThrow();
+        WorkloadIdentityIssuers.Provider provider = issuers.provider(issuer).orElseThrow();
         assertEquals(issuer, provider.issuer());
         assertEquals(PROJECT + ".svc.id.goog", provider.pool());
-        assertEquals(io.floci.gcp.core.common.ProjectNumbers.of(PROJECT), provider.projectNumber());
+        assertEquals(ProjectNumbers.of(PROJECT), provider.projectNumber());
         assertTrue(issuers.provider(issuer.replace("provider", "missing")).isEmpty());
         assertTrue(issuers.provider("https://example.com/issuer").isEmpty());
     }

@@ -41,7 +41,7 @@ public class GkeWorkloads {
         }
     }
 
-    private record Cached(Optional<Pod> pod, Instant until) {
+    private record Cached(Pod pod, Instant until) {
     }
 
     private final GkeClusterManager clusterManager;
@@ -57,10 +57,11 @@ public class GkeWorkloads {
         String key = cluster.getContainerId() + "|" + node + "|" + ip;
         Cached cached = pods.get(key);
         if (cached != null && cached.until().isAfter(Instant.now())) {
-            return cached.pod();
+            return Optional.ofNullable(cached.pod());
         }
         Optional<Pod> pod = lookUp(cluster, node, ip);
-        pods.put(key, new Cached(pod, Instant.now().plus(CACHE)));
+        pods.values().removeIf(entry -> entry.until().isBefore(Instant.now()));
+        pods.put(key, new Cached(pod.orElse(null), Instant.now().plus(CACHE)));
         return pod;
     }
 

@@ -526,6 +526,11 @@ public class GkeClusterManager {
         return new NodeNetworking(hosts, null, List.of());
     }
 
+    /** floci-gcp's own Docker network when it runs in a container on one, so other containers there reach a sidecar; else null. */
+    String emulatorNetworkWhenInContainer() {
+        return containerDetector.isRunningInContainer() ? emulatorNetwork() : null;
+    }
+
     /** The Docker network floci-gcp's sidecars join, as the control plane resolves it; null when there is none. */
     private String emulatorNetwork() {
         return containerBuilder.newContainer("floci-gke-network-probe")

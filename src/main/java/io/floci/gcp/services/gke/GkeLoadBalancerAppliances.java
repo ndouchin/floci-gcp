@@ -123,6 +123,10 @@ public class GkeLoadBalancerAppliances {
                 ensurePublicNetwork();
                 clusterManager.connect(id, publicNetworkName(), lb.getAddress());
             }
+            String emulatorNetwork = clusterManager.emulatorNetworkWhenInContainer();
+            if (emulatorNetwork != null && !emulatorNetwork.equals(cluster.getNetworkName())) {
+                clusterManager.connect(id, emulatorNetwork, null);
+            }
             lifecycleManager.runDockerApi("start load balancer appliance " + name, () -> {
                 lifecycleManager.getDockerClient().startContainerCmd(id).exec();
                 return null;

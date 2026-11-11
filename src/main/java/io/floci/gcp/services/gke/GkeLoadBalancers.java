@@ -50,6 +50,7 @@ public class GkeLoadBalancers {
     static final String MODE_OFF = "off";
     static final String FINALIZER = "service.kubernetes.io/load-balancer-cleanup";
     static final String HOST_PORTS_ANNOTATION = "floci.io/load-balancer-host-ports";
+    static final String EXCLUDE_LABEL = "node.kubernetes.io/exclude-from-external-load-balancers";
     private static final long INTERVAL_SECONDS = 3;
 
     private final StorageBackend<String, StoredLoadBalancer> store;
@@ -329,7 +330,10 @@ public class GkeLoadBalancers {
         }
     }
 
-    /** The InternalIP of each Ready node the emulator runs for the cluster; Nodes it does not run are not backends. */
+    /**
+     * The InternalIP of each Ready node the emulator runs for the cluster, except those labelled
+     * {@code node.kubernetes.io/exclude-from-external-load-balancers}; Nodes it does not run are not backends.
+     */
     private static List<String> backends(StoredCluster cluster, List<JsonNode> objects) {
         Set<String> nodes = new HashSet<>();
         for (StoredNodePool pool : cluster.getNodePools() == null ? List.<StoredNodePool>of() : cluster.getNodePools()) {
@@ -339,7 +343,8 @@ public class GkeLoadBalancers {
         }
         List<String> backends = new ArrayList<>();
         for (JsonNode object : objects) {
-            if (!"Node".equals(object.path("kind").asText()) || !nodes.contains(object.path("metadata").path("name").asText())) {
+            if (!"Node".equals(object.path("kind").asText()) || !nodes.contains(object.path("metadata").path("name").asText())
+                    || object.path("metadata").path("labels").has(EXCLUDE_LABEL)) {
                 continue;
             }
             boolean ready = false;

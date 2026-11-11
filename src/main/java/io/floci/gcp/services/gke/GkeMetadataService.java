@@ -255,6 +255,7 @@ public class GkeMetadataService {
                 return forbidden(gsa(caller), "getAccessToken", "GenerateAccessToken");
             }
             cached = minted.get();
+            tokenCache.values().removeIf(entry -> entry.expiry().isBefore(now));
             tokenCache.put(key, cached);
         }
         ObjectNode body = JSON.createObjectNode()

@@ -638,7 +638,9 @@ New real clusters run with k3s's servicelb off (`--disable=servicelb`) and floci
 - **Reachability.** One appliance container per Service, from the cluster's own k3s image (no new image), holds
   the address (on the cluster network for internal ones, on a `floci-gcp-gke-lb-public` network of the
   external range for external ones) and forwards each port to the Service's node port on the cluster's Ready
-  nodes, spread at random. It runs with `NET_ADMIN` and `net.ipv4.ip_forward=1`, not privileged. Every port is
+  nodes not labelled `node.kubernetes.io/exclude-from-external-load-balancers`, spread at random. It runs with
+  `NET_ADMIN` and `net.ipv4.ip_forward=1`, not privileged, and also joins floci-gcp's own network when floci-gcp
+  runs in a container, so other containers there reach it by name. Every port is
   also published on `127.0.0.1` and listed on the Service in the `floci.io/load-balancer-host-ports` annotation
   (for example `TCP/80=127.0.0.1:41234`).
 
@@ -646,6 +648,7 @@ New real clusters run with k3s's servicelb off (`--disable=servicelb`) and floci
 |---|---|---|
 | A Pod of the cluster | yes (kube-proxy, and the appliance) | yes (kube-proxy) |
 | A container on the cluster network | yes | only when also on the external network |
+| A container on floci-gcp's network (floci-gcp in Docker) | the appliance by name or its address there | same |
 | The host (macOS or Linux) | `127.0.0.1:<host port>` | `127.0.0.1:<host port>` |
 | A Linux Docker host | the address too | the address too |
 

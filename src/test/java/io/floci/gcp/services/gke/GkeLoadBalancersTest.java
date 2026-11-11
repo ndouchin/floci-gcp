@@ -257,4 +257,17 @@ class GkeLoadBalancersTest {
         verify(gke, never()).findCluster(anyString(), anyString(), anyString());
         assertEquals(0, store.scan(k -> true).size());
     }
+
+    @Test
+    void nodesExcludedFromExternalLoadBalancersAreNotBackends() throws Exception {
+        objects.set(0, JSON.readTree("""
+                {"kind": "Node", "metadata": {"name": "n1", "labels": {
+                  "node.kubernetes.io/exclude-from-external-load-balancers": ""}}, "status": {
+                  "addresses": [{"type": "InternalIP", "address": "172.18.128.2"}],
+                  "conditions": [{"type": "Ready", "status": "True"}]}}"""));
+
+        controller().reconcile(cluster);
+
+        verify(appliances).ensure(any(), any(), anyList(), eq(List.of()));
+    }
 }
