@@ -58,6 +58,7 @@ class ServiceRegistryConsistencyTest {
     /** Classes that serve requests but belong to no descriptor, so no Service Usage gate or enabled flag applies. */
     private static final Map<String, String> UNREGISTERED_ENDPOINTS = Map.ofEntries(
             Map.entry("EmulatorInfoController", "emulator control endpoints under /_floci-gcp, not a Google API"),
+            Map.entry("GkeMetadataController", "GKE metadata server responder called by the node relays, not by GCP clients"),
             Map.entry("GkeTokenWebhookController", "TokenReview webhook called by the k3s API server, not by GCP clients"),
             Map.entry("HealthController", "emulator health probe, not a Google API"),
             Map.entry("IamPolicyGrpcController", "google.iam.v1.IAMPolicy mixin shared by every API, so it names no single API"),
