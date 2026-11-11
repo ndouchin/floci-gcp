@@ -287,6 +287,7 @@ docker run -d --name floci-gcp \
 | `FLOCI_GCP_SERVICES_CLOUDSQL_MYSQL84_IMAGE` | `mysql:8.4.11` |
 | `FLOCI_GCP_SERVICES_GKE_IMAGE_REPOSITORY` | `rancher/k3s` (tag pinned per Kubernetes minor) |
 | `FLOCI_GCP_SERVICES_GKE_DEFAULT_IMAGE` | _(none; forces one image on every GKE cluster)_ |
+| `FLOCI_GCP_SERVICES_GKE_MAX_NODES_PER_CLUSTER` | `5` (node containers one GKE cluster runs at most) |
 | `FLOCI_GCP_SERVICES_BIGQUERY_DUCK_DEFAULT_IMAGE` | `floci/floci-duck:latest` |
 
 ## Persistence and Storage Modes
