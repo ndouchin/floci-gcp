@@ -473,6 +473,103 @@ public class ComputeService {
         iamService.deleteResourceAndPolicy(policies.getFirst(),
                 () -> saveDroppingLockedPolicies(project, state, policies.subList(1, policies.size())));
     }
+    /**
+     * Records the regional forwarding rule a GKE LoadBalancer Service's external address belongs to, so Compute's
+     * external pool never hands that address out again. The address is {@code requested} (a reserved address of the
+     * project is claimed, as a forwarding rule claims it) or the first free one of the pool not in {@code avoid}. An
+     * existing rule of that name keeps its address.
+     */
+    public synchronized String reserveLoadBalancerAddress(String project, String region, String name, String requested,
+                                                          Set<String> avoid, String protocol, List<Integer> ports,
+                                                          String description) {
+        ComputeProject state = state(project);
+        String key = "regions/" + region + "/forwardingRules/" + name;
+        ObjectNode existing = state.resources.get(key);
+        if (existing != null) {
+            return existing.path("IPAddress").asText();
+        }
+        Context c = new Context(project, "regions/" + region, "forwardingRules", name, null, state);
+        String selfLink = c.link(key);
+        ObjectNode reservation = null;
+        String address = requested;
+        if (requested != null) {
+            ComputeNetworkResources.ipv4(requested);
+            reservation = state.resources.values().stream()
+                    .filter(r -> r.path("kind").asText().equals("compute#address") && r.path("address").asText().equals(requested))
+                    .findFirst().orElse(null);
+            boolean claimed = reservation != null && !reservation.path("users").isEmpty();
+            boolean taken = reservation == null && ComputeNetworkResources.used(c, requested);
+            if (claimed || taken || avoid.contains(requested)) {
+                throw GcpException.invalidArgument("Address " + requested + " is already in use");
+            }
+        } else {
+            for (int i = 1; i <= 254 && address == null; i++) {
+                String candidate = "203.0.113." + i;
+                if (!avoid.contains(candidate) && !ComputeNetworkResources.used(c, candidate)) {
+                    address = candidate;
+                }
+            }
+            if (address == null) {
+                throw GcpException.resourceExhausted("Emulator external IPv4 pool exhausted");
+            }
+        }
+        ObjectNode rule = object()
+                .put("kind", "compute#forwardingRule")
+                .put("id", Long.toString(++state.sequence))
+                .put("creationTimestamp", Instant.now().toString())
+                .put("name", name)
+                .put("description", description == null ? "" : description)
+                .put("region", c.link("regions/" + region))
+                .put("IPAddress", address)
+                .put("IPProtocol", protocol)
+                .put("loadBalancingScheme", "EXTERNAL")
+                .put("networkTier", "PREMIUM")
+                .put("selfLink", selfLink)
+                .put("fingerprint", fingerprint())
+                .put("labelFingerprint", fingerprint());
+        if (ports.size() == 1) {
+            rule.put("portRange", ports.get(0) + "-" + ports.get(0));
+        } else if (ports.size() <= 5) {
+            ports.forEach(port -> rule.withArray("ports").add(Integer.toString(port)));
+        } else {
+            rule.put("portRange", ports.stream().min(Integer::compare).orElseThrow() + "-"
+                    + ports.stream().max(Integer::compare).orElseThrow());
+        }
+        state.resources.put(key, rule);
+        if (reservation != null) {
+            ComputeNetworkResources.claim(reservation, selfLink);
+        }
+        save(project, state);
+        return address;
+    }
+
+    /** Deletes a GKE load balancer's forwarding rule, releasing a reserved address it claimed. */
+    public synchronized void releaseLoadBalancerAddress(String project, String region, String name) {
+        ComputeProject state = state(project);
+        String key = "regions/" + region + "/forwardingRules/" + name;
+        ObjectNode rule = state.resources.remove(key);
+        if (rule == null) {
+            return;
+        }
+        for (ObjectNode address : state.resources.values()) {
+            if (address.path("kind").asText().equals("compute#address")
+                    && address.path("address").asText().equals(rule.path("IPAddress").asText())) {
+                ComputeNetworkResources.release(address, rule.path("selfLink").asText());
+            }
+        }
+        save(project, state);
+    }
+
+    /** The address of a reserved address resource named {@code name}, regional in {@code region} or global. */
+    public synchronized Optional<String> reservedAddress(String project, String region, String name) {
+        ComputeProject state = state(project);
+        ObjectNode address = state.resources.get("regions/" + region + "/addresses/" + name);
+        if (address == null) {
+            address = state.resources.get("global/addresses/" + name);
+        }
+        return address == null ? Optional.empty() : Optional.of(address.path("address").asText());
+    }
+
     public synchronized ObjectNode project(String project) {
         Context c = context(project, "global/operations", state(project));
         if (c.state.creationTimestamp == null) {
