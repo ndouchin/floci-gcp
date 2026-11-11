@@ -222,7 +222,8 @@ public class GkeLoadBalancers {
         store.put(key(record), record);
         Map<String, Integer> hostPorts = appliances.ensure(cluster, record, spec.ports(), backends);
         if (gke.findCluster(cluster.getProject(), cluster.getLocation(), cluster.getName())
-                .filter(current -> Objects.equals(current.getId(), cluster.getId())).isEmpty()) {
+                .filter(current -> Objects.equals(current.getId(), cluster.getId()) && "RUNNING".equals(current.getStatus()))
+                .isEmpty()) {
             appliances.remove(record.getAppliance());
             return;
         }

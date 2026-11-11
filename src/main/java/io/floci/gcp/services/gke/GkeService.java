@@ -638,6 +638,11 @@ public class GkeService {
         // cluster rather than one whose containers are gone.
         synchronized (clusterLock(key)) {
             if (!mock()) {
+                synchronized (lifecycleLock) {
+                    // STOPPING, as GKE reports a cluster being deleted, tells the load balancer controller to leave it.
+                    cluster.setStatus("STOPPING");
+                    clusterStore.put(key, cluster);
+                }
                 clusterManager.deleteCluster(cluster);
             }
             for (StoredNodePool pool : listNodePools(project, location, clusterId)) {

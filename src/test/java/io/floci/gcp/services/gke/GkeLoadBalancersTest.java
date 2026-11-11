@@ -270,4 +270,16 @@ class GkeLoadBalancersTest {
 
         verify(appliances).ensure(any(), any(), anyList(), eq(List.of()));
     }
+
+    @Test
+    void anApplianceStartedWhileTheClusterIsBeingDeletedIsRemovedAgain() {
+        StoredCluster stopping = new StoredCluster(cluster);
+        stopping.setStatus("STOPPING");
+        when(gke.findCluster("p1", "us-central1-a", "c1")).thenReturn(Optional.of(stopping));
+
+        controller().reconcile(cluster);
+
+        verify(appliances).remove("appliance-u1");
+        verify(kubectl, never()).patchStatus(any(), anyString(), anyString(), anyString());
+    }
 }
