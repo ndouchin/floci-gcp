@@ -5,6 +5,7 @@ import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.gke.model.StoredCluster;
+import io.floci.gcp.services.gke.model.StoredNode;
 import io.floci.gcp.services.gke.model.StoredNodePool;
 import io.floci.gcp.services.gke.operations.GkeOperationService;
 import io.floci.gcp.services.gke.operations.OperationType;
@@ -18,8 +19,11 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -31,6 +35,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -75,7 +82,19 @@ class GkeServiceTest {
         when(config.services()).thenReturn(services);
         when(services.gke()).thenReturn(gkeConfig);
         when(gkeConfig.mock()).thenReturn(true);
+        when(gkeConfig.maxNodesPerCluster()).thenReturn(5);
         when(config.baseUrl()).thenReturn("http://localhost:4588");
+        when(clusterManager.imageFor(any())).thenAnswer(inv -> "k3s:" + GkeReleases.minorOf(inv.getArgument(0)));
+        when(clusterManager.hostResources()).thenReturn(new GkeClusterManager.HostResources(6, 10L << 30));
+        when(clusterManager.readToken(any())).thenReturn("K10token::server:secret");
+        when(clusterManager.adoptNode(any())).thenReturn(true);
+        doAnswer(inv -> {
+            StoredNode node = inv.getArgument(1);
+            node.setContainerName("container-" + node.getName());
+            node.setContainerId("id-" + node.getName());
+            node.setImage(inv.<GkeClusterManager.NodeLaunch>getArgument(2).image());
+            return null;
+        }).when(clusterManager).startNode(any(), any(), any());
 
         operationStore = new InMemoryStorage<>();
         GkeOperationService operationService = new GkeOperationService(operationStore, DEFAULT_PROJECT);
@@ -266,6 +285,313 @@ class GkeServiceTest {
         assertEquals("RUNNING", replacementOp.getStatus());
         assertNull(replacementOp.getError());
         assertEquals("PROVISIONING", service.getCluster(PROJECT, LOCATION, "racing").getStatus());
+    }
+
+    @Test
+    void deleteClusterRemovesTheControlPlaneRatherThanStoppingIt() {
+        when(gkeConfig.mock()).thenReturn(false);
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "kept"));
+
+        service.deleteCluster(PROJECT, LOCATION, "kept");
+
+        verify(clusterManager).deleteCluster(any());
+        verify(clusterManager, never()).stopCluster(any());
+    }
+
+    @Test
+    void restoreBringsPersistedClustersBackThroughReconciling() {
+        StoredCluster running = persistedCluster("survivor", "RUNNING");
+        when(gkeConfig.mock()).thenReturn(false);
+        when(clusterManager.restoreCluster(any())).thenReturn(GkeClusterManager.RestoreOutcome.ADOPTED);
+
+        service.restoreRuntime();
+
+        verify(clusterManager).restoreCluster(any());
+        assertEquals("RECONCILING", service.getCluster(PROJECT, LOCATION, running.getName()).getStatus());
+
+        when(clusterManager.isReady(any())).thenReturn(true);
+        doAnswer(inv -> {
+            inv.<StoredCluster>getArgument(0).setCaCertificate("bmV3LWNh");
+            return null;
+        }).when(clusterManager).finalizeCluster(any());
+        service.pollReadiness();
+
+        StoredCluster restored = service.getCluster(PROJECT, LOCATION, running.getName());
+        assertEquals("RUNNING", restored.getStatus());
+        assertEquals("bmV3LWNh", restored.getCaCertificate());
+    }
+
+    @Test
+    void restoreLeavesFailedClustersAlone() {
+        persistedCluster("failed", "ERROR");
+        when(gkeConfig.mock()).thenReturn(false);
+
+        service.restoreRuntime();
+
+        verify(clusterManager, never()).restoreCluster(any());
+        assertEquals("ERROR", service.getCluster(PROJECT, LOCATION, "failed").getStatus());
+    }
+
+    @Test
+    void aRestoreThatCannotStartTheControlPlaneMarksTheClusterFailed() {
+        persistedCluster("unlucky", "RUNNING");
+        when(gkeConfig.mock()).thenReturn(false);
+        when(clusterManager.restoreCluster(any())).thenThrow(new IllegalStateException("docker unavailable"));
+
+        service.restoreRuntime();
+
+        StoredCluster cluster = service.getCluster(PROJECT, LOCATION, "unlucky");
+        assertEquals("ERROR", cluster.getStatus());
+        assertTrue(cluster.getStatusMessage().contains("docker unavailable"));
+    }
+
+    @Test
+    void aReconcilingClusterThatNeverComesBackFails() {
+        persistedCluster("slow", "RUNNING");
+        when(gkeConfig.mock()).thenReturn(false);
+        when(clusterManager.restoreCluster(any())).thenReturn(GkeClusterManager.RestoreOutcome.RECREATED_ON_VOLUME);
+        service.restoreRuntime();
+
+        clusterStore.get("projects/" + PROJECT + "/locations/" + LOCATION + "/clusters/slow").orElseThrow()
+                .setReconcileSince(Instant.now().minus(GkeService.STARTUP_TIMEOUT).minusSeconds(1).toString());
+        service.pollReadiness();
+
+        assertEquals("ERROR", service.getCluster(PROJECT, LOCATION, "slow").getStatus());
+    }
+
+    private StoredCluster persistedCluster(String name, String status) {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", name));
+        StoredCluster cluster = clusterStore.get("projects/" + PROJECT + "/locations/" + LOCATION + "/clusters/" + name)
+                .orElseThrow();
+        cluster.setStatus(status);
+        cluster.setContainerId("old-container");
+        cluster.setCaCertificate("b2xkLWNh");
+        return cluster;
+    }
+
+
+    // ── Node pools as nodes ──────────────────────────────────────────────────
+
+    private void runRealCluster(String name, Map<String, Object> extra) {
+        when(gkeConfig.mock()).thenReturn(false);
+        Map<String, Object> body = new HashMap<>(extra);
+        body.put("name", name);
+        service.createCluster(PROJECT, "us-central1-a", body);
+        when(clusterManager.isReady(any())).thenReturn(true);
+        doAnswer(inv -> {
+            inv.<StoredCluster>getArgument(0).setCaCertificate("Y2E=");
+            return null;
+        }).when(clusterManager).finalizeCluster(any());
+        service.pollReadiness();
+        assertEquals("RUNNING", service.getCluster(PROJECT, "us-central1-a", name).getStatus());
+    }
+
+    private void markNodesReady(String location, String cluster) {
+        Map<String, GkeClusterManager.NodeState> states = new HashMap<>();
+        for (StoredNodePool pool : service.listNodePools(PROJECT, location, cluster)) {
+            for (StoredNode node : pool.getNodes() == null ? List.<StoredNode>of() : pool.getNodes()) {
+                states.put(node.getName(), new GkeClusterManager.NodeState(true, Map.of(), 0));
+            }
+        }
+        when(clusterManager.nodeStates(any())).thenReturn(states);
+    }
+
+    @Test
+    void aNewClustersNodePoolGetsANodeOnceItsControlPlaneRuns() {
+        runRealCluster("nodes", Map.of("initialNodeCount", 1, "nodeConfig", Map.of("machineType", "e2-standard-2")));
+        StoredNodePool pool = service.getNodePool(PROJECT, "us-central1-a", "nodes", "default-pool");
+        assertEquals("PROVISIONING", pool.getStatus());
+
+        service.pollReadiness();
+
+        pool = service.getNodePool(PROJECT, "us-central1-a", "nodes", "default-pool");
+        assertEquals(1, pool.getNodes().size());
+        StoredNode node = pool.getNodes().get(0);
+        assertTrue(node.getName().matches("^gke-nodes-default-pool-[0-9a-f]{8}-[a-z0-9]{4}$"), node.getName());
+        assertEquals("us-central1-a", node.getZone());
+        assertEquals("PROVISIONING", pool.getStatus());
+        assertEquals(List.of("https://www.googleapis.com/compute/v1/projects/" + PROJECT
+                        + "/zones/us-central1-a/instanceGroupManagers/" + node.getName().substring(0,
+                        node.getName().length() - 5) + "-grp"), pool.getInstanceGroupUrls());
+
+        markNodesReady("us-central1-a", "nodes");
+        service.pollReadiness();
+
+        assertEquals("RUNNING", service.getNodePool(PROJECT, "us-central1-a", "nodes", "default-pool").getStatus());
+        assertEquals("K10token::server:secret", service.getCluster(PROJECT, "us-central1-a", "nodes").getK3sToken());
+        verify(clusterManager, times(1)).startNode(any(), any(), any());
+    }
+
+    @Test
+    void theNodeCapGoesToTheDefaultPoolFirstAndPoolsStillReportTheirSize() {
+        when(gkeConfig.mock()).thenReturn(false);
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "capped", "initialNodeCount", 1));
+        when(clusterManager.isReady(any())).thenReturn(true);
+        doAnswer(inv -> {
+            inv.<StoredCluster>getArgument(0).setCaCertificate("Y2E=");
+            return null;
+        }).when(clusterManager).finalizeCluster(any());
+        service.pollReadiness();
+        service.createNodePool(PROJECT, LOCATION, "capped", Map.of("name", "workers", "initialNodeCount", 2));
+
+        service.pollReadiness();
+
+        StoredNodePool defaultPool = service.getNodePool(PROJECT, LOCATION, "capped", "default-pool");
+        StoredNodePool workers = service.getNodePool(PROJECT, LOCATION, "capped", "workers");
+        assertEquals(Set.of("us-central1-a", "us-central1-b", "us-central1-c"),
+                defaultPool.getNodes().stream().map(StoredNode::getZone).collect(Collectors.toSet()));
+        assertEquals(2, workers.getNodes().size());
+        assertEquals(2, workers.getInitialNodeCount());
+        assertEquals(3, workers.getInstanceGroupUrls().size());
+
+        service.deleteNodePool(PROJECT, LOCATION, "capped", "default-pool");
+        verify(clusterManager, times(3)).removeNode(any());
+        service.pollReadiness();
+        assertEquals(5, service.getNodePool(PROJECT, LOCATION, "capped", "workers").getNodes().size());
+    }
+
+    @Test
+    void resizingAPoolRunsUntilItsNewNodesAreReady() {
+        runRealCluster("resize", Map.of("initialNodeCount", 1));
+        service.pollReadiness();
+        markNodesReady("us-central1-a", "resize");
+        service.pollReadiness();
+
+        StoredOperation op = service.setNodePoolSize(PROJECT, "us-central1-a", "resize", "default-pool",
+                Map.of("nodeCount", 3));
+
+        assertEquals("RUNNING", op.getStatus());
+        assertEquals(OperationType.SET_NODE_POOL_SIZE, op.getOperationType());
+        service.pollReadiness();
+        StoredNodePool pool = service.getNodePool(PROJECT, "us-central1-a", "resize", "default-pool");
+        assertEquals(3, pool.getNodes().size());
+        assertEquals("RECONCILING", pool.getStatus());
+        assertEquals("RUNNING", service.getOperation(PROJECT, "us-central1-a", op.getName()).getStatus());
+
+        markNodesReady("us-central1-a", "resize");
+        service.pollReadiness();
+
+        assertEquals("DONE", service.getOperation(PROJECT, "us-central1-a", op.getName()).getStatus());
+        assertEquals("RUNNING", service.getNodePool(PROJECT, "us-central1-a", "resize", "default-pool").getStatus());
+
+        service.setNodePoolSize(PROJECT, "us-central1-a", "resize", "default-pool", Map.of("nodeCount", 0));
+        service.pollReadiness();
+        assertEquals(List.of(), service.getNodePool(PROJECT, "us-central1-a", "resize", "default-pool").getNodes());
+        assertEquals("RUNNING", service.getNodePool(PROJECT, "us-central1-a", "resize", "default-pool").getStatus());
+        verify(clusterManager, times(3)).removeNode(any());
+    }
+
+    @Test
+    void aNodeVersionOnAnotherMinorReplacesThePoolsNodes() {
+        runRealCluster("node-upgrade", Map.of("initialClusterVersion", "1.36", "initialNodeCount", 1,
+                "nodePools", List.of(Map.of("name", "default-pool", "initialNodeCount", 1, "version", "1.35"))));
+        service.pollReadiness();
+        String before = service.getNodePool(PROJECT, "us-central1-a", "node-upgrade", "default-pool")
+                .getNodes().get(0).getName();
+
+        StoredOperation op = service.updateNodePool(PROJECT, "us-central1-a", "node-upgrade", "default-pool",
+                Map.of("nodeVersion", "1.36"));
+        service.pollReadiness();
+
+        assertEquals("RUNNING", op.getStatus());
+        StoredNode replacement = service.getNodePool(PROJECT, "us-central1-a", "node-upgrade", "default-pool")
+                .getNodes().get(0);
+        assertNotEquals(before, replacement.getName());
+        assertEquals("k3s:36", replacement.getImage());
+        verify(clusterManager).deleteKubernetesNodes(any(), org.mockito.ArgumentMatchers.eq(List.of(before)));
+    }
+
+    @Test
+    void aPoolCreatedWhileTheNodesAreReconciledGetsItsNodes() {
+        runRealCluster("racing-pool", Map.of("initialNodeCount", 1));
+        when(clusterManager.readToken(any())).thenAnswer(inv -> {
+            if (service.listNodePools(PROJECT, "us-central1-a", "racing-pool").size() == 1) {
+                service.createNodePool(PROJECT, "us-central1-a", "racing-pool",
+                        Map.of("name", "late", "initialNodeCount", 1));
+            }
+            return "K10token::server:secret";
+        });
+        service.setNodePoolSize(PROJECT, "us-central1-a", "racing-pool", "default-pool", Map.of("nodeCount", 2));
+
+        service.pollReadiness();
+        assertEquals("PROVISIONING", service.getNodePool(PROJECT, "us-central1-a", "racing-pool", "late").getStatus());
+
+        service.pollReadiness();
+        assertEquals(1, service.getNodePool(PROJECT, "us-central1-a", "racing-pool", "late").getNodes().size());
+    }
+
+    @Test
+    void aRestoredClusterAdoptsItsSurvivingNodes() {
+        runRealCluster("survivor-nodes", Map.of("initialNodeCount", 1));
+        service.pollReadiness();
+        markNodesReady("us-central1-a", "survivor-nodes");
+        service.pollReadiness();
+        when(clusterManager.restoreCluster(any())).thenReturn(GkeClusterManager.RestoreOutcome.ADOPTED);
+
+        service.restoreRuntime();
+        assertEquals("RECONCILING",
+                service.getNodePool(PROJECT, "us-central1-a", "survivor-nodes", "default-pool").getStatus());
+        service.pollReadiness();
+        service.pollReadiness();
+
+        verify(clusterManager, times(1)).startNode(any(), any(), any());
+        verify(clusterManager, times(1)).adoptNode(any());
+        assertEquals("RUNNING",
+                service.getNodePool(PROJECT, "us-central1-a", "survivor-nodes", "default-pool").getStatus());
+    }
+
+    @Test
+    void aControlPlaneThatStartedOverGetsNewNodes() {
+        runRealCluster("fresh-start", Map.of("initialNodeCount", 1));
+        service.pollReadiness();
+        when(clusterManager.restoreCluster(any())).thenReturn(GkeClusterManager.RestoreOutcome.RECREATED_FRESH);
+        when(clusterManager.readToken(any())).thenReturn("K10other::server:secret");
+
+        service.restoreRuntime();
+        service.pollReadiness();
+        service.pollReadiness();
+
+        verify(clusterManager, times(2)).startNode(any(), any(), any());
+        verify(clusterManager).removeNode(any());
+    }
+
+    @Test
+    void aGpuPoolAddedNextToACpuPoolIsTaintedAndAdvertisesItsGpus() {
+        runRealCluster("gpus", Map.of("initialNodeCount", 1));
+        service.createNodePool(PROJECT, "us-central1-a", "gpus", Map.of("name", "t4", "initialNodeCount", 1,
+                "config", Map.of("machineType", "n1-standard-4",
+                        "accelerators", List.of(Map.of("acceleratorType", "nvidia-tesla-t4", "acceleratorCount", 1)))));
+        assertTrue(service.getNodePool(PROJECT, "us-central1-a", "gpus", "t4").isGpuTaint());
+        assertFalse(service.getNodePool(PROJECT, "us-central1-a", "gpus", "default-pool").isGpuTaint());
+        service.pollReadiness();
+
+        StoredNode gpuNode = service.getNodePool(PROJECT, "us-central1-a", "gpus", "t4").getNodes().get(0);
+        Map<String, GkeClusterManager.NodeState> states = new HashMap<>();
+        for (StoredNodePool pool : service.listNodePools(PROJECT, "us-central1-a", "gpus")) {
+            for (StoredNode node : pool.getNodes()) {
+                states.put(node.getName(), new GkeClusterManager.NodeState(true, Map.of(), 0));
+            }
+        }
+        when(clusterManager.nodeStates(any())).thenReturn(states);
+        service.pollReadiness();
+
+        verify(clusterManager).setGpuCapacity(any(), org.mockito.ArgumentMatchers.eq(gpuNode.getName()),
+                org.mockito.ArgumentMatchers.eq(1));
+        assertEquals("PROVISIONING", service.getNodePool(PROJECT, "us-central1-a", "gpus", "t4").getStatus());
+
+        states.put(gpuNode.getName(), new GkeClusterManager.NodeState(true, Map.of(), 1));
+        service.pollReadiness();
+        assertEquals("RUNNING", service.getNodePool(PROJECT, "us-central1-a", "gpus", "t4").getStatus());
+    }
+
+    @Test
+    void aClusterWhoseOnlyPoolHasGpusLeavesItUntainted() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "gpu-only",
+                "nodeConfig", Map.of("machineType", "g2-standard-4")));
+        assertFalse(service.getNodePool(PROJECT, LOCATION, "gpu-only", "default-pool").isGpuTaint());
+        service.createNodePool(PROJECT, LOCATION, "gpu-only", Map.of("name", "more-gpus",
+                "config", Map.of("machineType", "a2-highgpu-1g")));
+        assertFalse(service.getNodePool(PROJECT, LOCATION, "gpu-only", "more-gpus").isGpuTaint());
     }
 
     @Test
@@ -478,6 +804,26 @@ class GkeServiceTest {
     }
 
     @Test
+    void clustersOnTheSameNetworkGetPodRangesThatDoNotOverlap() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "first"));
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "second"));
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "elsewhere", "network", "other"));
+
+        assertEquals("10.0.0.0/14", service.getCluster(PROJECT, LOCATION, "first").getClusterIpv4Cidr());
+        assertEquals("10.4.0.0/14", service.getCluster(PROJECT, LOCATION, "second").getClusterIpv4Cidr());
+        assertEquals("10.0.0.0/14", service.getCluster(PROJECT, LOCATION, "elsewhere").getClusterIpv4Cidr());
+        assertEquals("34.118.224.0/20", service.getCluster(PROJECT, LOCATION, "second").getServicesIpv4Cidr());
+        assertEquals(24, service.getCluster(PROJECT, LOCATION, "second").getNodePodCidrSize());
+    }
+
+    @Test
+    void theDefaultMaximumPodsSizesEachNodesPodRange() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "dense",
+                "defaultMaxPodsConstraint", Map.of("maxPodsPerNode", "32")));
+        assertEquals(26, service.getCluster(PROJECT, LOCATION, "dense").getNodePodCidrSize());
+    }
+
+    @Test
     void extraConfigRoundTripsUnknownClusterFieldsFromCreation() {
         // ip_allocation_policy / private_cluster_config / workload_identity_config style blocks:
         // the emulator doesn't act on them, but must echo them back unchanged.
@@ -568,14 +914,14 @@ class GkeServiceTest {
         String etagBefore = before.getEtag();
 
         StoredOperation op = service.updateMaster(PROJECT, LOCATION, "upgrade-master",
-                Map.of("masterVersion", "1.31.5-gke.1"));
+                Map.of("masterVersion", "1.36.5-gke.1"));
 
         assertEquals(OperationType.UPGRADE_MASTER, op.getOperationType());
         assertEquals("DONE", op.getStatus());
         assertTrue(op.getTargetLink().endsWith("/clusters/upgrade-master"));
 
         StoredCluster after = service.getCluster(PROJECT, LOCATION, "upgrade-master");
-        assertEquals("1.31.5-gke.1", after.getCurrentMasterVersion());
+        assertEquals("1.36.5-gke.1", after.getCurrentMasterVersion());
         // Real GKE upgrades the control plane independently of node pools, so neither the
         // cluster's node version aggregate nor any pool's own version moves with the master.
         assertEquals(nodeVersionBefore, after.getCurrentNodeVersion());
@@ -589,30 +935,31 @@ class GkeServiceTest {
     @Test
     void updateMasterResolvesVersionAliasesToTheAdvertisedVersion() {
         service.createCluster(PROJECT, LOCATION, Map.of("name", "alias-cluster",
-                "initialClusterVersion", "1.29.0-gke.1"));
+                "initialClusterVersion", "1.34.0-gke.1"));
         String advertised = (String) service.getServerConfig().get("defaultClusterVersion");
+        assertEquals("1.35.10-gke.1000000", advertised);
 
-        // "-" and "latest" are the aliases the proto documents for UpdateMasterRequest.master_version.
+        // "-" is the server default ("latest" is covered below, since it is two minors away here).
         service.updateMaster(PROJECT, LOCATION, "alias-cluster", Map.of("masterVersion", "-"));
         assertEquals(advertised, service.getCluster(PROJECT, LOCATION, "alias-cluster").getCurrentMasterVersion());
 
-        service.updateMaster(PROJECT, LOCATION, "alias-cluster", Map.of("masterVersion", "1.29.0-gke.1"));
+        // A "1.X" / "1.X.Y" prefix of an advertised version picks that version.
+        service.updateMaster(PROJECT, LOCATION, "alias-cluster", Map.of("masterVersion", "1.35.10"));
+        assertEquals(advertised, service.getCluster(PROJECT, LOCATION, "alias-cluster").getCurrentMasterVersion());
+        service.updateMaster(PROJECT, LOCATION, "alias-cluster", Map.of("masterVersion", "1.36"));
+        assertEquals("1.36.6-gke.1000000", service.getCluster(PROJECT, LOCATION, "alias-cluster").getCurrentMasterVersion());
         service.updateMaster(PROJECT, LOCATION, "alias-cluster", Map.of("masterVersion", "latest"));
-        assertEquals(advertised, service.getCluster(PROJECT, LOCATION, "alias-cluster").getCurrentMasterVersion());
+        assertEquals("1.37.2-gke.1000000", service.getCluster(PROJECT, LOCATION, "alias-cluster").getCurrentMasterVersion());
 
-        // A "1.X" / "1.X.Y" prefix of the advertised version picks that version.
-        String minor = advertised.substring(0, advertised.indexOf('.', advertised.indexOf('.') + 1));
-        service.updateMaster(PROJECT, LOCATION, "alias-cluster", Map.of("masterVersion", "1.29.0-gke.1"));
-        service.updateMaster(PROJECT, LOCATION, "alias-cluster", Map.of("masterVersion", minor));
-        assertEquals(advertised, service.getCluster(PROJECT, LOCATION, "alias-cluster").getCurrentMasterVersion());
-
-        // A prefix that only shares leading characters is not a match ("1.3" is not "1.30"), and
-        // an alias that matches no valid version has nothing to pick, so it is rejected (#231).
-        String notAPrefix = minor.substring(0, minor.length() - 1);
-        GcpException unmatched = assertThrows(GcpException.class,
-                () -> service.updateMaster(PROJECT, LOCATION, "alias-cluster", Map.of("masterVersion", notAPrefix)));
-        assertEquals(400, unmatched.getHttpStatus());
-        assertEquals(advertised, service.getCluster(PROJECT, LOCATION, "alias-cluster").getCurrentMasterVersion());
+        // A prefix that only shares leading characters is not a match ("1.3" is not "1.37"), and an
+        // alias that matches no valid version has nothing to pick, so it is rejected (#231).
+        for (String unmatched : List.of("1.3", "1.37.1", "1.31")) {
+            GcpException ex = assertThrows(GcpException.class,
+                    () -> service.updateMaster(PROJECT, LOCATION, "alias-cluster", Map.of("masterVersion", unmatched)));
+            assertEquals(400, ex.getHttpStatus());
+            assertEquals("No valid versions with the prefix \"" + unmatched + "\" found.", ex.getMessage());
+        }
+        assertEquals("1.37.2-gke.1000000", service.getCluster(PROJECT, LOCATION, "alias-cluster").getCurrentMasterVersion());
     }
 
     @Test
@@ -623,7 +970,7 @@ class GkeServiceTest {
         service.createCluster(PROJECT, LOCATION, Map.of("name", "shape-cluster"));
         StoredCluster before = service.getCluster(PROJECT, LOCATION, "shape-cluster");
 
-        for (String bad : List.of("1", "1.", "v1.30", "banana", "1.30.5-gke", "1.30.5-gke.")) {
+        for (String bad : List.of("1", "1.", "v1.35", "banana", "1.35.5-gke", "1.35.5-gke.")) {
             GcpException ex = assertThrows(GcpException.class,
                     () -> service.updateMaster(PROJECT, LOCATION, "shape-cluster", Map.of("masterVersion", bad)),
                     bad);
@@ -633,9 +980,126 @@ class GkeServiceTest {
         assertEquals(before.getCurrentMasterVersion(), after.getCurrentMasterVersion());
         assertEquals(before.getEtag(), after.getEtag());
 
-        // An explicit 1.X.Y-gke.N that is not the advertised version is still kept verbatim.
-        service.updateMaster(PROJECT, LOCATION, "shape-cluster", Map.of("masterVersion", "1.31.5-gke.1"));
-        assertEquals("1.31.5-gke.1", service.getCluster(PROJECT, LOCATION, "shape-cluster").getCurrentMasterVersion());
+        // An explicit 1.X.Y-gke.N of a supported minor that is not the advertised version is kept verbatim.
+        service.updateMaster(PROJECT, LOCATION, "shape-cluster", Map.of("masterVersion", "1.36.5-gke.1"));
+        assertEquals("1.36.5-gke.1", service.getCluster(PROJECT, LOCATION, "shape-cluster").getCurrentMasterVersion());
+    }
+
+    @Test
+    void anUnsupportedMinorIsRejectedLikeARetiredGkeVersion() {
+        GcpException create = assertThrows(GcpException.class, () -> service.createCluster(PROJECT, LOCATION,
+                Map.of("name", "retired", "initialClusterVersion", "1.31.5-gke.1")));
+        assertEquals(400, create.getHttpStatus());
+        assertEquals("Master version \"1.31.5-gke.1\" is unsupported.", create.getMessage());
+        assertThrows(GcpException.class, () -> service.getCluster(PROJECT, LOCATION, "retired"));
+
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "current"));
+        GcpException pool = assertThrows(GcpException.class, () -> service.createNodePool(PROJECT, LOCATION,
+                "current", Map.of("name", "old-pool", "version", "1.29.0-gke.1")));
+        assertEquals("Node version \"1.29.0-gke.1\" is unsupported.", pool.getMessage());
+    }
+
+    @Test
+    void createClusterDefaultsToItsReleaseChannelsDefaultVersion() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "no-channel"));
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "rapid", "releaseChannel", Map.of("channel", "RAPID")));
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "latest", "initialClusterVersion", "latest"));
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "minor", "initialClusterVersion", "1.36"));
+
+        assertEquals("1.35.10-gke.1000000", service.getCluster(PROJECT, LOCATION, "no-channel").getCurrentMasterVersion());
+        assertEquals("1.36.6-gke.1000000", service.getCluster(PROJECT, LOCATION, "rapid").getCurrentMasterVersion());
+        assertEquals("1.36.6-gke.1000000",
+                service.getNodePool(PROJECT, LOCATION, "rapid", "default-pool").getVersion());
+        assertEquals("1.37.2-gke.1000000", service.getCluster(PROJECT, LOCATION, "latest").getCurrentMasterVersion());
+        StoredCluster minor = service.getCluster(PROJECT, LOCATION, "minor");
+        assertEquals("1.36.6-gke.1000000", minor.getCurrentMasterVersion());
+        assertEquals("1.36.6-gke.1000000", minor.getInitialClusterVersion());
+    }
+
+    @Test
+    void theControlPlaneMovesOneMinorUpAtATimeAndNeverDownAMinor() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "steps"));
+
+        GcpException skip = assertThrows(GcpException.class,
+                () -> service.updateMaster(PROJECT, LOCATION, "steps", Map.of("masterVersion", "1.37.2-gke.1000000")));
+        assertEquals(400, skip.getHttpStatus());
+        GcpException down = assertThrows(GcpException.class,
+                () -> service.updateCluster(PROJECT, LOCATION, "steps", Map.of("desiredMasterVersion", "1.34")));
+        assertEquals("Master cannot be upgraded to \"1.34.13-gke.1000000\": specified version is not newer than "
+                + "the current version.", down.getMessage());
+
+        service.updateMaster(PROJECT, LOCATION, "steps", Map.of("masterVersion", "1.35.9-gke.1"));
+        assertEquals("1.35.9-gke.1", service.getCluster(PROJECT, LOCATION, "steps").getCurrentMasterVersion());
+    }
+
+    @Test
+    void nodesStayWithinTwoMinorsBelowTheControlPlane() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "skew", "initialClusterVersion", "1.36"));
+
+        GcpException newer = assertThrows(GcpException.class, () -> service.createNodePool(PROJECT, LOCATION, "skew",
+                Map.of("name", "ahead", "version", "1.37")));
+        assertEquals(400, newer.getHttpStatus());
+        GcpException tooOld = assertThrows(GcpException.class, () -> service.updateNodePool(PROJECT, LOCATION, "skew",
+                "default-pool", Map.of("nodeVersion", "1.33")));
+        assertEquals(400, tooOld.getHttpStatus());
+        assertThrows(GcpException.class, () -> service.createCluster(PROJECT, LOCATION, Map.of("name", "skew-2",
+                "initialClusterVersion", "1.35", "nodePools", List.of(Map.of("name", "p", "version", "1.36")))));
+        assertThrows(GcpException.class, () -> service.getCluster(PROJECT, LOCATION, "skew-2"));
+
+        service.createNodePool(PROJECT, LOCATION, "skew", Map.of("name", "older", "version", "1.34"));
+        assertEquals("1.34.13-gke.1000000", service.getNodePool(PROJECT, LOCATION, "skew", "older").getVersion());
+    }
+
+    @Test
+    void aMasterUpgradeToAnotherImageRecreatesTheControlPlaneAndWaitsForIt() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "upgrade-runtime"));
+        when(gkeConfig.mock()).thenReturn(false);
+        when(clusterManager.imageFor(any())).thenAnswer(inv -> "k3s:" + GkeReleases.minorOf(inv.getArgument(0)));
+
+        StoredOperation patchOnly = service.updateMaster(PROJECT, LOCATION, "upgrade-runtime",
+                Map.of("masterVersion", "1.35.11-gke.2"));
+        assertEquals("DONE", patchOnly.getStatus());
+        verify(clusterManager, never()).replaceControlPlane(any());
+
+        StoredOperation op = service.updateMaster(PROJECT, LOCATION, "upgrade-runtime", Map.of("masterVersion", "1.36"));
+
+        assertEquals("RUNNING", op.getStatus());
+        assertEquals(OperationType.UPGRADE_MASTER, op.getOperationType());
+        verify(clusterManager).replaceControlPlane(any());
+        StoredCluster upgrading = service.getCluster(PROJECT, LOCATION, "upgrade-runtime");
+        assertEquals("RECONCILING", upgrading.getStatus());
+        assertEquals("1.36.6-gke.1000000", upgrading.getCurrentMasterVersion());
+        assertThrows(GcpException.class, () -> service.updateMaster(PROJECT, LOCATION, "upgrade-runtime",
+                Map.of("masterVersion", "1.37")));
+
+        when(clusterManager.isReady(any())).thenReturn(true);
+        doAnswer(inv -> {
+            inv.<StoredCluster>getArgument(0).setCaCertificate("Y2E=");
+            return null;
+        }).when(clusterManager).finalizeCluster(any());
+        service.pollReadiness();
+
+        assertEquals("DONE", service.getOperation(PROJECT, LOCATION, op.getName()).getStatus());
+        assertEquals("RUNNING", service.getCluster(PROJECT, LOCATION, "upgrade-runtime").getStatus());
+    }
+
+    @Test
+    void aReadinessPassWhileTheControlPlaneIsReplacedDoesNotFailTheUpgrade() {
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "racing-upgrade"));
+        when(gkeConfig.mock()).thenReturn(false);
+        when(clusterManager.isControlPlaneStopped(any())).thenReturn(true);
+        doAnswer(inv -> {
+            StoredCluster replaced = inv.getArgument(0);
+            replaced.setContainerId(null);
+            service.pollReadiness();
+            replaced.setContainerId("new-container");
+            return null;
+        }).when(clusterManager).replaceControlPlane(any());
+
+        StoredOperation op = service.updateMaster(PROJECT, LOCATION, "racing-upgrade", Map.of("masterVersion", "1.36"));
+
+        assertEquals("RUNNING", service.getOperation(PROJECT, LOCATION, op.getName()).getStatus());
+        assertEquals("RECONCILING", service.getCluster(PROJECT, LOCATION, "racing-upgrade").getStatus());
     }
 
     @Test
@@ -674,10 +1138,15 @@ class GkeServiceTest {
         assertNotNull(config.get("defaultClusterVersion"));
         assertNotNull(config.get("validNodeVersions"));
         assertNotNull(config.get("validMasterVersions"));
+        assertEquals("1.35.10-gke.1000000", config.get("defaultClusterVersion"));
+        assertEquals(List.of("1.37.2-gke.1000000", "1.36.6-gke.1000000", "1.35.10-gke.1000000", "1.34.13-gke.1000000"),
+                config.get("validMasterVersions"));
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> channels = (List<Map<String, Object>>) config.get("channels");
-        assertEquals(3, channels.size());
-        assertTrue(channels.stream().anyMatch(c -> "REGULAR".equals(c.get("channel"))));
+        assertEquals(List.of("RAPID", "REGULAR", "STABLE", "EXTENDED"), channels.stream().map(c -> c.get("channel")).toList());
+        Map<String, Object> rapid = channels.get(0);
+        assertEquals("1.36.6-gke.1000000", rapid.get("defaultVersion"));
+        assertEquals(List.of("1.37.2-gke.1000000", "1.36.6-gke.1000000", "1.35.10-gke.1000000"), rapid.get("validVersions"));
     }
 
     @Test
@@ -793,7 +1262,7 @@ class GkeServiceTest {
         legacyCluster.setProject(PROJECT);
         legacyCluster.setLocation(LOCATION);
         legacyCluster.setStatus("RUNNING");
-        legacyCluster.setCurrentNodeVersion("1.29.0-gke.1");
+        legacyCluster.setCurrentNodeVersion("1.34.0-gke.1");
         StoredNodePool embeddedPool = new StoredNodePool();
         embeddedPool.setName("default-pool");
         embeddedPool.setStatus("RUNNING");
@@ -907,19 +1376,19 @@ class GkeServiceTest {
         // cluster had been moved off it by desiredNodeVersion, the next pool created without an
         // explicit version came back on the old version while the cluster and its existing pools
         // reported the new one.
-        service.createCluster(PROJECT, LOCATION, Map.of("name", "inherit-cluster"));
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "inherit-cluster", "initialClusterVersion", "1.37"));
         service.updateCluster(PROJECT, LOCATION, "inherit-cluster",
-                Map.of("desiredNodeVersion", "1.32.0-gke.7"));
+                Map.of("desiredNodeVersion", "1.36.0-gke.7"));
 
         service.createNodePool(PROJECT, LOCATION, "inherit-cluster", Map.of("name", "later-pool"));
 
         StoredNodePool created = service.getNodePool(PROJECT, LOCATION, "inherit-cluster", "later-pool");
-        assertEquals("1.32.0-gke.7", created.getVersion());
+        assertEquals("1.36.0-gke.7", created.getVersion());
 
         // An explicit version on the request still wins.
         service.createNodePool(PROJECT, LOCATION, "inherit-cluster",
-                Map.of("name", "pinned-pool", "version", "1.30.1-gke.2"));
-        assertEquals("1.30.1-gke.2",
+                Map.of("name", "pinned-pool", "version", "1.35.1-gke.2"));
+        assertEquals("1.35.1-gke.2",
                 service.getNodePool(PROJECT, LOCATION, "inherit-cluster", "pinned-pool").getVersion());
     }
 
@@ -929,15 +1398,15 @@ class GkeServiceTest {
         // single-pool cluster must still upgrade without it. The pool carries its own version and
         // GetNodePool reads it from the pool store, so moving only the cluster aggregate would
         // leave the pool reporting the old version to reconciliation clients.
-        service.createCluster(PROJECT, LOCATION, Map.of("name", "version-cluster"));
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "version-cluster", "initialClusterVersion", "1.36"));
 
         service.updateCluster(PROJECT, LOCATION, "version-cluster",
-                Map.of("desiredNodeVersion", "1.31.5-gke.1"));
+                Map.of("desiredNodeVersion", "1.36.5-gke.1"));
 
-        assertEquals("1.31.5-gke.1",
+        assertEquals("1.36.5-gke.1",
                 service.getCluster(PROJECT, LOCATION, "version-cluster").getCurrentNodeVersion());
         for (StoredNodePool pool : service.listNodePools(PROJECT, LOCATION, "version-cluster")) {
-            assertEquals("1.31.5-gke.1", pool.getVersion(),
+            assertEquals("1.36.5-gke.1", pool.getVersion(),
                     "node pool " + pool.getName() + " must report the requested version");
         }
     }
@@ -950,17 +1419,18 @@ class GkeServiceTest {
         // resources nobody asked to touch, which reads as drift on the next plan.
         service.createCluster(PROJECT, LOCATION, Map.of(
                 "name", "targeted-cluster",
+                "initialClusterVersion", "1.36",
                 "nodePools", List.of(
-                        Map.of("name", "default-pool", "version", "1.30.0-gke.1"),
-                        Map.of("name", "workers", "version", "1.30.0-gke.1"))));
+                        Map.of("name", "default-pool", "version", "1.35.0-gke.1"),
+                        Map.of("name", "workers", "version", "1.35.0-gke.1"))));
 
         service.updateCluster(PROJECT, LOCATION, "targeted-cluster", Map.of(
                 "desiredNodePoolId", "default-pool",
-                "desiredNodeVersion", "1.31.5-gke.1"));
+                "desiredNodeVersion", "1.36.5-gke.1"));
 
-        assertEquals("1.31.5-gke.1",
+        assertEquals("1.36.5-gke.1",
                 service.getNodePool(PROJECT, LOCATION, "targeted-cluster", "default-pool").getVersion());
-        assertEquals("1.30.0-gke.1",
+        assertEquals("1.35.0-gke.1",
                 service.getNodePool(PROJECT, LOCATION, "targeted-cluster", "workers").getVersion(),
                 "a pool the request did not name must keep its version");
     }
@@ -970,21 +1440,21 @@ class GkeServiceTest {
         service.createCluster(PROJECT, LOCATION, Map.of(
                 "name", "ambiguous-cluster",
                 "nodePools", List.of(
-                        Map.of("name", "default-pool", "version", "1.30.0-gke.1"),
-                        Map.of("name", "workers", "version", "1.30.0-gke.1"))));
+                        Map.of("name", "default-pool", "version", "1.35.0-gke.1"),
+                        Map.of("name", "workers", "version", "1.35.0-gke.1"))));
 
         GcpException thrown = assertThrows(GcpException.class,
                 () -> service.updateCluster(PROJECT, LOCATION, "ambiguous-cluster",
-                        Map.of("desiredNodeVersion", "1.31.5-gke.1")));
+                        Map.of("desiredNodeVersion", "1.36.5-gke.1")));
         assertEquals(400, thrown.getHttpStatus(),
                 "an ambiguous target is a bad request, not a silent upgrade of every pool");
 
         // The rejection must not have half-applied. The target is resolved before anything is
         // assigned, so neither the cluster aggregate nor any pool moved.
-        assertNotEquals("1.31.5-gke.1",
+        assertNotEquals("1.36.5-gke.1",
                 service.getCluster(PROJECT, LOCATION, "ambiguous-cluster").getCurrentNodeVersion());
         for (StoredNodePool pool : service.listNodePools(PROJECT, LOCATION, "ambiguous-cluster")) {
-            assertEquals("1.30.0-gke.1", pool.getVersion(),
+            assertEquals("1.35.0-gke.1", pool.getVersion(),
                     "node pool " + pool.getName() + " must be untouched by a rejected update");
         }
     }
@@ -996,7 +1466,7 @@ class GkeServiceTest {
         GcpException thrown = assertThrows(GcpException.class,
                 () -> service.updateCluster(PROJECT, LOCATION, "unknown-target", Map.of(
                         "desiredNodePoolId", "no-such-pool",
-                        "desiredNodeVersion", "1.31.5-gke.1")));
+                        "desiredNodeVersion", "1.36.5-gke.1")));
         assertEquals(404, thrown.getHttpStatus());
     }
 
@@ -1005,11 +1475,11 @@ class GkeServiceTest {
         // desiredNodePoolId routes the request; it is not Cluster state. Left in the generic
         // desired* merge it would land in extraConfig and be serialized as a `nodePoolId` field
         // the Cluster resource does not have — and Terraform sends it on every cluster update.
-        service.createCluster(PROJECT, LOCATION, Map.of("name", "no-leak"));
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "no-leak", "initialClusterVersion", "1.36"));
 
         service.updateCluster(PROJECT, LOCATION, "no-leak", Map.of(
                 "desiredNodePoolId", "default-pool",
-                "desiredNodeVersion", "1.31.5-gke.1"));
+                "desiredNodeVersion", "1.36.5-gke.1"));
 
         assertNull(service.getCluster(PROJECT, LOCATION, "no-leak").getExtraConfig().get("nodePoolId"));
     }
@@ -1019,21 +1489,21 @@ class GkeServiceTest {
         // gcloud `container clusters upgrade C --master` sends desiredMasterVersion "-" when no
         // --cluster-version is given; stored verbatim, the cluster then reported version "-".
         service.createCluster(PROJECT, LOCATION, Map.of("name", "master-alias",
-                "initialClusterVersion", "1.29.0-gke.1"));
+                "initialClusterVersion", "1.34.0-gke.1"));
         String advertised = (String) service.getServerConfig().get("defaultClusterVersion");
 
         service.updateCluster(PROJECT, LOCATION, "master-alias", Map.of("desiredMasterVersion", "-"));
         assertEquals(advertised, service.getCluster(PROJECT, LOCATION, "master-alias").getCurrentMasterVersion());
 
-        service.updateCluster(PROJECT, LOCATION, "master-alias", Map.of("desiredMasterVersion", "1.29.0-gke.1"));
-        service.updateCluster(PROJECT, LOCATION, "master-alias", Map.of("desiredMasterVersion", "latest"));
-        assertEquals(advertised, service.getCluster(PROJECT, LOCATION, "master-alias").getCurrentMasterVersion());
-
         // An explicit version is still stored verbatim, and node versions do not move with the master.
-        service.updateCluster(PROJECT, LOCATION, "master-alias", Map.of("desiredMasterVersion", "1.31.5-gke.1"));
+        service.updateCluster(PROJECT, LOCATION, "master-alias", Map.of("desiredMasterVersion", "1.36.5-gke.1"));
         StoredCluster cluster = service.getCluster(PROJECT, LOCATION, "master-alias");
-        assertEquals("1.31.5-gke.1", cluster.getCurrentMasterVersion());
-        assertEquals("1.29.0-gke.1", cluster.getCurrentNodeVersion());
+        assertEquals("1.36.5-gke.1", cluster.getCurrentMasterVersion());
+        assertEquals("1.34.0-gke.1", cluster.getCurrentNodeVersion());
+
+        service.updateCluster(PROJECT, LOCATION, "master-alias", Map.of("desiredMasterVersion", "latest"));
+        assertEquals("1.37.2-gke.1000000",
+                service.getCluster(PROJECT, LOCATION, "master-alias").getCurrentMasterVersion());
     }
 
     @Test
@@ -1042,7 +1512,7 @@ class GkeServiceTest {
         // type escaped as an unmapped ClassCastException (a 500) instead of the 400 every other
         // malformed request gets. Terraform sends desiredMasterVersion on cluster updates.
         // An older explicit version, so "latest" would visibly move the node version if applied.
-        service.createCluster(PROJECT, LOCATION, Map.of("name", "typed-update", "initialClusterVersion", "1.29.0-gke.1"));
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "typed-update", "initialClusterVersion", "1.34.0-gke.1"));
         StoredCluster before = service.getCluster(PROJECT, LOCATION, "typed-update");
         String masterBefore = before.getCurrentMasterVersion();
         String nodeBefore = before.getCurrentNodeVersion();
@@ -1088,36 +1558,38 @@ class GkeServiceTest {
         // desired_node_version documents the same aliases as the master field, except that "-"
         // "picks the Kubernetes master version": the cluster's control plane, not the server default.
         service.createCluster(PROJECT, LOCATION, Map.of("name", "node-alias",
-                "initialClusterVersion", "1.29.0-gke.1"));
+                "initialClusterVersion", "1.36.1-gke.1",
+                "nodePools", List.of(Map.of("name", "default-pool", "version", "1.34.0-gke.1"))));
         String advertised = (String) service.getServerConfig().get("defaultClusterVersion");
-        assertNotEquals(advertised, "1.29.0-gke.1");
+        assertEquals("1.34.0-gke.1", service.getCluster(PROJECT, LOCATION, "node-alias").getCurrentNodeVersion());
 
-        service.updateCluster(PROJECT, LOCATION, "node-alias", Map.of("desiredNodeVersion", "latest"));
+        // "-" on the node side is the server default here, which is not the cluster's master version.
+        service.updateCluster(PROJECT, LOCATION, "node-alias", Map.of("desiredNodeVersion", "1.35"));
         assertEquals(advertised, service.getCluster(PROJECT, LOCATION, "node-alias").getCurrentNodeVersion());
         assertEquals(advertised, service.getNodePool(PROJECT, LOCATION, "node-alias", "default-pool").getVersion());
 
         service.updateCluster(PROJECT, LOCATION, "node-alias", Map.of("desiredNodeVersion", "-"));
         StoredCluster cluster = service.getCluster(PROJECT, LOCATION, "node-alias");
-        assertEquals("1.29.0-gke.1", cluster.getCurrentMasterVersion());
-        assertEquals("1.29.0-gke.1", cluster.getCurrentNodeVersion());
-        assertEquals("1.29.0-gke.1", service.getNodePool(PROJECT, LOCATION, "node-alias", "default-pool").getVersion());
+        assertEquals("1.36.1-gke.1", cluster.getCurrentMasterVersion());
+        assertEquals("1.36.1-gke.1", cluster.getCurrentNodeVersion());
+        assertEquals("1.36.1-gke.1", service.getNodePool(PROJECT, LOCATION, "node-alias", "default-pool").getVersion());
     }
 
     @Test
     void startupRefreshesAggregatesPersistedByEarlierBuilds() {
         // A cluster written by a build that never recomputed the aggregate: the pool moved on to
-        // the default version through UpdateNodePool, the cluster still says 1.29.0-gke.1.
+        // the default version through UpdateNodePool, the cluster still says 1.34.0-gke.1.
         String clusterName = "projects/" + PROJECT + "/locations/" + LOCATION + "/clusters/stale";
         StoredCluster stale = new StoredCluster();
         stale.setName("stale");
         stale.setProject(PROJECT);
         stale.setLocation(LOCATION);
-        stale.setCurrentMasterVersion("1.29.0-gke.1");
-        stale.setCurrentNodeVersion("1.29.0-gke.1");
+        stale.setCurrentMasterVersion("1.34.0-gke.1");
+        stale.setCurrentNodeVersion("1.34.0-gke.1");
         InMemoryStorage<String, StoredCluster> clusterStore = new InMemoryStorage<>();
         clusterStore.put(clusterName, stale);
         InMemoryStorage<String, StoredNodePool> poolStore = new InMemoryStorage<>();
-        for (String[] pool : new String[][] {{"default-pool", "1.30.5-gke.1014001"}, {"workers", "1.30.1-gke.7"}}) {
+        for (String[] pool : new String[][] {{"default-pool", "1.35.5-gke.1014001"}, {"workers", "1.35.1-gke.7"}}) {
             StoredNodePool p = new StoredNodePool();
             p.setName(pool[0]);
             p.setProject(PROJECT);
@@ -1131,18 +1603,19 @@ class GkeServiceTest {
 
         restarted.init();
 
-        assertEquals("1.30.1-gke.7", restarted.getCluster(PROJECT, LOCATION, "stale").getCurrentNodeVersion());
+        assertEquals("1.35.1-gke.7", restarted.getCluster(PROJECT, LOCATION, "stale").getCurrentNodeVersion());
     }
 
     @Test
     void updateNodePoolMovesTheClusterNodeVersionAggregate() {
         // #233: only createCluster and UpdateCluster wrote currentNodeVersion, so a pool upgraded
         // through UpdateNodePool left the cluster reporting the version no pool ran any more.
-        service.createCluster(PROJECT, LOCATION, Map.of("name", "agg", "initialClusterVersion", "1.29.0-gke.1"));
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "agg", "initialClusterVersion", "1.35",
+                "nodePools", List.of(Map.of("name", "default-pool", "version", "1.34.0-gke.1"))));
         String advertised = (String) service.getServerConfig().get("defaultClusterVersion");
-        assertEquals("1.29.0-gke.1", service.getCluster(PROJECT, LOCATION, "agg").getCurrentNodeVersion());
+        assertEquals("1.34.0-gke.1", service.getCluster(PROJECT, LOCATION, "agg").getCurrentNodeVersion());
 
-        service.updateNodePool(PROJECT, LOCATION, "agg", "default-pool", Map.of("nodeVersion", "latest"));
+        service.updateNodePool(PROJECT, LOCATION, "agg", "default-pool", Map.of("nodeVersion", "-"));
 
         assertEquals(advertised, service.getNodePool(PROJECT, LOCATION, "agg", "default-pool").getVersion());
         assertEquals(advertised, service.getCluster(PROJECT, LOCATION, "agg").getCurrentNodeVersion());
@@ -1151,35 +1624,36 @@ class GkeServiceTest {
     @Test
     void currentNodeVersionIsTheMinimumAcrossPools() {
         // Two pools created below the master version: the aggregate follows the pools, not the master.
-        service.createCluster(PROJECT, LOCATION, Map.of("name", "min-agg", "nodePools", List.of(
-                Map.of("name", "default-pool", "version", "1.30.0-gke.1"),
-                Map.of("name", "workers", "version", "1.30.0-gke.1"))));
-        assertEquals("1.30.0-gke.1", service.getCluster(PROJECT, LOCATION, "min-agg").getCurrentNodeVersion());
+        service.createCluster(PROJECT, LOCATION, Map.of("name", "min-agg", "initialClusterVersion", "1.36",
+                "nodePools", List.of(
+                Map.of("name", "default-pool", "version", "1.35.0-gke.1"),
+                Map.of("name", "workers", "version", "1.35.0-gke.1"))));
+        assertEquals("1.35.0-gke.1", service.getCluster(PROJECT, LOCATION, "min-agg").getCurrentNodeVersion());
 
         // One pool upgraded: the aggregate stays on the pool still behind (minimum, not last write).
-        service.updateNodePool(PROJECT, LOCATION, "min-agg", "workers", Map.of("nodeVersion", "1.31.5-gke.1"));
-        assertEquals("1.30.0-gke.1", service.getCluster(PROJECT, LOCATION, "min-agg").getCurrentNodeVersion());
-        // Same through UpdateCluster targeting the other pool: both pools now at 1.31.5, so it moves.
+        service.updateNodePool(PROJECT, LOCATION, "min-agg", "workers", Map.of("nodeVersion", "1.36.5-gke.1"));
+        assertEquals("1.35.0-gke.1", service.getCluster(PROJECT, LOCATION, "min-agg").getCurrentNodeVersion());
+        // Same through UpdateCluster targeting the other pool: both pools now at 1.36.5, so it moves.
         service.updateCluster(PROJECT, LOCATION, "min-agg",
-                Map.of("desiredNodeVersion", "1.31.5-gke.1", "desiredNodePoolId", "default-pool"));
-        assertEquals("1.31.5-gke.1", service.getCluster(PROJECT, LOCATION, "min-agg").getCurrentNodeVersion());
+                Map.of("desiredNodeVersion", "1.36.5-gke.1", "desiredNodePoolId", "default-pool"));
+        assertEquals("1.36.5-gke.1", service.getCluster(PROJECT, LOCATION, "min-agg").getCurrentNodeVersion());
 
-        // A new pool on an older version lowers it; "1.9" is a string comparison trap ("1.9" > "1.31").
-        service.createNodePool(PROJECT, LOCATION, "min-agg", Map.of("name", "legacy", "version", "1.9.0-gke.1"));
-        assertEquals("1.9.0-gke.1", service.getCluster(PROJECT, LOCATION, "min-agg").getCurrentNodeVersion());
+        // A new pool on an older version lowers it.
+        service.createNodePool(PROJECT, LOCATION, "min-agg", Map.of("name", "legacy", "version", "1.34.0-gke.1"));
+        assertEquals("1.34.0-gke.1", service.getCluster(PROJECT, LOCATION, "min-agg").getCurrentNodeVersion());
         // Deleting that pool raises it again.
         service.deleteNodePool(PROJECT, LOCATION, "min-agg", "legacy");
-        assertEquals("1.31.5-gke.1", service.getCluster(PROJECT, LOCATION, "min-agg").getCurrentNodeVersion());
+        assertEquals("1.36.5-gke.1", service.getCluster(PROJECT, LOCATION, "min-agg").getCurrentNodeVersion());
         // Deleting every pool: nothing to aggregate, the cluster keeps what it reports.
         service.deleteNodePool(PROJECT, LOCATION, "min-agg", "workers");
         service.deleteNodePool(PROJECT, LOCATION, "min-agg", "default-pool");
-        assertEquals("1.31.5-gke.1", service.getCluster(PROJECT, LOCATION, "min-agg").getCurrentNodeVersion());
+        assertEquals("1.36.5-gke.1", service.getCluster(PROJECT, LOCATION, "min-agg").getCurrentNodeVersion());
     }
 
     @Test
     void updateClusterRejectsMalformedVersionsWithoutTouchingTheCluster() {
         service.createCluster(PROJECT, LOCATION, Map.of("name", "version-shape",
-                "initialClusterVersion", "1.29.0-gke.1"));
+                "initialClusterVersion", "1.34.0-gke.1"));
         StoredCluster before = service.getCluster(PROJECT, LOCATION, "version-shape");
         StoredNodePool poolBefore = service.getNodePool(PROJECT, LOCATION, "version-shape", "default-pool");
         String nodeVersionBefore = before.getCurrentNodeVersion();
@@ -1197,7 +1671,7 @@ class GkeServiceTest {
 
         GcpException combined = assertThrows(GcpException.class,
                 () -> service.updateCluster(PROJECT, LOCATION, "version-shape", Map.of(
-                        "desiredNodeVersion", "1.30.0-gke.1",
+                        "desiredNodeVersion", "1.35.0-gke.1",
                         "desiredMasterVersion", 123)));
         assertEquals("desiredMasterVersion must be a string", combined.getMessage());
 
@@ -1213,16 +1687,16 @@ class GkeServiceTest {
     @Test
     void updateClusterTreatsBlankVersionsAsUnset() {
         service.createCluster(PROJECT, LOCATION, Map.of("name", "blank-version",
-                "initialClusterVersion", "1.29.0-gke.1"));
+                "initialClusterVersion", "1.34.0-gke.1"));
 
         for (String field : List.of("desiredNodeVersion", "desiredMasterVersion")) {
             service.updateCluster(PROJECT, LOCATION, "blank-version", Map.of(field, ""));
         }
 
         StoredCluster cluster = service.getCluster(PROJECT, LOCATION, "blank-version");
-        assertEquals("1.29.0-gke.1", cluster.getCurrentMasterVersion());
-        assertEquals("1.29.0-gke.1", cluster.getCurrentNodeVersion());
-        assertEquals("1.29.0-gke.1",
+        assertEquals("1.34.0-gke.1", cluster.getCurrentMasterVersion());
+        assertEquals("1.34.0-gke.1", cluster.getCurrentNodeVersion());
+        assertEquals("1.34.0-gke.1",
                 service.getNodePool(PROJECT, LOCATION, "blank-version", "default-pool").getVersion());
     }
 
@@ -1231,16 +1705,13 @@ class GkeServiceTest {
         // UpdateNodePoolRequest.node_version documents the same aliases as desired_node_version
         // (#229): stored verbatim, GetNodePool reported "latest" or "-" as the pool's version.
         service.createCluster(PROJECT, LOCATION, Map.of("name", "pool-alias",
-                "initialClusterVersion", "1.29.0-gke.1"));
+                "initialClusterVersion", "1.36.1-gke.1",
+                "nodePools", List.of(Map.of("name", "default-pool", "version", "1.34.0-gke.1"))));
         String advertised = (String) service.getServerConfig().get("defaultClusterVersion");
-        assertNotEquals(advertised, "1.29.0-gke.1");
-
-        service.updateNodePool(PROJECT, LOCATION, "pool-alias", "default-pool", Map.of("nodeVersion", "latest"));
-        assertEquals(advertised, service.getNodePool(PROJECT, LOCATION, "pool-alias", "default-pool").getVersion());
 
         // "-" picks the cluster's master version, not the server default.
         service.updateNodePool(PROJECT, LOCATION, "pool-alias", "default-pool", Map.of("nodeVersion", "-"));
-        assertEquals("1.29.0-gke.1", service.getNodePool(PROJECT, LOCATION, "pool-alias", "default-pool").getVersion());
+        assertEquals("1.36.1-gke.1", service.getNodePool(PROJECT, LOCATION, "pool-alias", "default-pool").getVersion());
 
         // A 1.X alias that matches the advertised version resolves to it; one that matches
         // nothing is rejected and leaves the pool alone (#231).
@@ -1274,20 +1745,19 @@ class GkeServiceTest {
             GcpException master = assertThrows(GcpException.class,
                     () -> service.updateMaster(PROJECT, LOCATION, "unmatched", Map.of("masterVersion", alias)), alias);
             assertEquals(400, master.getHttpStatus());
-            assertTrue(master.getMessage().startsWith("Invalid masterVersion \"" + alias + "\""), master.getMessage());
-            assertTrue(master.getMessage().contains(advertised), "the rejection names what is valid: " + master.getMessage());
+            assertEquals("No valid versions with the prefix \"" + alias + "\" found.", master.getMessage());
 
             GcpException desiredMaster = assertThrows(GcpException.class, () -> service.updateCluster(
                     PROJECT, LOCATION, "unmatched", Map.of("desiredMasterVersion", alias)), alias);
-            assertTrue(desiredMaster.getMessage().startsWith("Invalid desiredMasterVersion \"" + alias + "\""));
+            assertEquals(400, desiredMaster.getHttpStatus());
 
             GcpException desiredNode = assertThrows(GcpException.class, () -> service.updateCluster(
                     PROJECT, LOCATION, "unmatched", Map.of("desiredNodeVersion", alias)), alias);
-            assertTrue(desiredNode.getMessage().startsWith("Invalid desiredNodeVersion \"" + alias + "\""));
+            assertEquals(400, desiredNode.getHttpStatus());
 
             GcpException node = assertThrows(GcpException.class, () -> service.updateNodePool(
                     PROJECT, LOCATION, "unmatched", "default-pool", Map.of("nodeVersion", alias)), alias);
-            assertTrue(node.getMessage().startsWith("Invalid nodeVersion \"" + alias + "\""));
+            assertEquals(400, node.getHttpStatus());
         }
 
         StoredCluster after = service.getCluster(PROJECT, LOCATION, "unmatched");
@@ -1295,9 +1765,9 @@ class GkeServiceTest {
         assertEquals(nodeBefore, after.getCurrentNodeVersion());
         assertEquals(poolBefore, service.getNodePool(PROJECT, LOCATION, "unmatched", "default-pool").getVersion());
 
-        // An explicit 1.X.Y-gke.N outside the advertised one is still kept verbatim: a pin, not an alias.
-        service.updateNodePool(PROJECT, LOCATION, "unmatched", "default-pool", Map.of("nodeVersion", "1.27.3-gke.100"));
-        assertEquals("1.27.3-gke.100", service.getNodePool(PROJECT, LOCATION, "unmatched", "default-pool").getVersion());
+        // An explicit 1.X.Y-gke.N of a supported minor outside the advertised one is still kept verbatim: a pin.
+        service.updateNodePool(PROJECT, LOCATION, "unmatched", "default-pool", Map.of("nodeVersion", "1.34.3-gke.100"));
+        assertEquals("1.34.3-gke.100", service.getNodePool(PROJECT, LOCATION, "unmatched", "default-pool").getVersion());
     }
 
     @Test
@@ -1350,12 +1820,12 @@ class GkeServiceTest {
         service.createCluster(PROJECT, LOCATION, Map.of("name", "updatable"));
 
         StoredOperation op = service.updateCluster(PROJECT, LOCATION, "updatable", Map.of(
-                "desiredNodeVersion", "1.31.0-gke.1",
+                "desiredNodeVersion", "1.35.0-gke.1",
                 "desiredAddonsConfig", Map.of("httpLoadBalancing", Map.of("disabled", true))));
 
         assertEquals(OperationType.UPDATE_CLUSTER, op.getOperationType());
         StoredCluster cluster = service.getCluster(PROJECT, LOCATION, "updatable");
-        assertEquals("1.31.0-gke.1", cluster.getCurrentNodeVersion());
+        assertEquals("1.35.0-gke.1", cluster.getCurrentNodeVersion());
         assertNotNull(cluster.getExtraConfig().get("addonsConfig"));
     }
 }

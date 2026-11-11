@@ -42,6 +42,9 @@ public class StoredCluster {
     private String network;
     private String subnetwork;
     private String clusterIpv4Cidr;
+    private String servicesIpv4Cidr;
+    /** Prefix of each node's Pod range; 0 for clusters stored before ranges were applied to k3s. */
+    private int nodePodCidrSize;
     private List<String> locations;
     private String loggingService;
     private String monitoringService;
@@ -69,6 +72,18 @@ public class StoredCluster {
     private String volumeName;
     /** Name of the {@code CREATE_CLUSTER} operation that created this record. */
     private String createOperation;
+    /** When the cluster entered {@code RECONCILING}; its control plane must be ready again within the startup timeout. */
+    private String reconcileSince;
+    /** Operation finished when the cluster leaves {@code RECONCILING}, such as a control plane upgrade. */
+    private String pendingOperation;
+    /** The k3s join token agents use, read from the control plane once it is up. */
+    private String k3sToken;
+    private String networkName;
+    private String networkSubnet;
+    private String networkGateway;
+    private String serverIp;
+    /** Whether the node pools' agents must be brought in line with the pools' specs. */
+    private boolean nodesOutOfDate;
 
     public StoredCluster() {
     }
@@ -100,6 +115,8 @@ public class StoredCluster {
         this.network = other.network;
         this.subnetwork = other.subnetwork;
         this.clusterIpv4Cidr = other.clusterIpv4Cidr;
+        this.servicesIpv4Cidr = other.servicesIpv4Cidr;
+        this.nodePodCidrSize = other.nodePodCidrSize;
         this.locations = other.locations == null ? null : new ArrayList<>(other.locations);
         this.loggingService = other.loggingService;
         this.monitoringService = other.monitoringService;
@@ -117,6 +134,14 @@ public class StoredCluster {
         this.internalEndpoint = other.internalEndpoint;
         this.volumeName = other.volumeName;
         this.createOperation = other.createOperation;
+        this.reconcileSince = other.reconcileSince;
+        this.pendingOperation = other.pendingOperation;
+        this.k3sToken = other.k3sToken;
+        this.networkName = other.networkName;
+        this.networkSubnet = other.networkSubnet;
+        this.networkGateway = other.networkGateway;
+        this.serverIp = other.serverIp;
+        this.nodesOutOfDate = other.nodesOutOfDate;
     }
 
     public String getName() {
@@ -245,6 +270,22 @@ public class StoredCluster {
 
     public void setClusterIpv4Cidr(String clusterIpv4Cidr) {
         this.clusterIpv4Cidr = clusterIpv4Cidr;
+    }
+
+    public String getServicesIpv4Cidr() {
+        return servicesIpv4Cidr;
+    }
+
+    public void setServicesIpv4Cidr(String servicesIpv4Cidr) {
+        this.servicesIpv4Cidr = servicesIpv4Cidr;
+    }
+
+    public int getNodePodCidrSize() {
+        return nodePodCidrSize;
+    }
+
+    public void setNodePodCidrSize(int nodePodCidrSize) {
+        this.nodePodCidrSize = nodePodCidrSize;
     }
 
     public List<String> getLocations() {
@@ -381,5 +422,69 @@ public class StoredCluster {
 
     public void setCreateOperation(String createOperation) {
         this.createOperation = createOperation;
+    }
+
+    public String getReconcileSince() {
+        return reconcileSince;
+    }
+
+    public void setReconcileSince(String reconcileSince) {
+        this.reconcileSince = reconcileSince;
+    }
+
+    public String getPendingOperation() {
+        return pendingOperation;
+    }
+
+    public void setPendingOperation(String pendingOperation) {
+        this.pendingOperation = pendingOperation;
+    }
+
+    public String getK3sToken() {
+        return k3sToken;
+    }
+
+    public void setK3sToken(String k3sToken) {
+        this.k3sToken = k3sToken;
+    }
+
+    public String getNetworkName() {
+        return networkName;
+    }
+
+    public void setNetworkName(String networkName) {
+        this.networkName = networkName;
+    }
+
+    public String getNetworkSubnet() {
+        return networkSubnet;
+    }
+
+    public void setNetworkSubnet(String networkSubnet) {
+        this.networkSubnet = networkSubnet;
+    }
+
+    public String getNetworkGateway() {
+        return networkGateway;
+    }
+
+    public void setNetworkGateway(String networkGateway) {
+        this.networkGateway = networkGateway;
+    }
+
+    public String getServerIp() {
+        return serverIp;
+    }
+
+    public void setServerIp(String serverIp) {
+        this.serverIp = serverIp;
+    }
+
+    public boolean isNodesOutOfDate() {
+        return nodesOutOfDate;
+    }
+
+    public void setNodesOutOfDate(boolean nodesOutOfDate) {
+        this.nodesOutOfDate = nodesOutOfDate;
     }
 }

@@ -23,6 +23,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -73,6 +74,19 @@ class ContainerLifecycleManagerTest {
         inOrder.verify(removeContainerCmd).withForce(true);
         inOrder.verify(removeContainerCmd).exec();
         verify(dockerClient, never()).stopContainerCmd(anyString());
+    }
+
+    @Test
+    void removalsCanTakeTheContainersAnonymousVolumesAlong() {
+        when(dockerClient.removeContainerCmd(anyString())).thenReturn(removeContainerCmd);
+        when(removeContainerCmd.withForce(true)).thenReturn(removeContainerCmd);
+        when(removeContainerCmd.withRemoveVolumes(true)).thenReturn(removeContainerCmd);
+
+        manager().forceRemove("container-1", null, true);
+        manager().removeIfExists("stale", true);
+
+        verify(removeContainerCmd, times(2)).withRemoveVolumes(true);
+        verify(removeContainerCmd, times(2)).exec();
     }
 
     @Test

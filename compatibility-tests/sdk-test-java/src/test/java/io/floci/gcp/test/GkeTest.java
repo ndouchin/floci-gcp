@@ -84,6 +84,12 @@ class GkeTest {
         }
     }
 
+    /** {@code 1.35.10-gke.1000000} -> {@code 1.36}: GKE upgrades the control plane one minor at a time. */
+    private static String nextMinor(String version) {
+        String[] parts = version.split("[.-]");
+        return parts[0] + "." + (Integer.parseInt(parts[1]) + 1);
+    }
+
     private static Operation awaitDone(Operation op) throws InterruptedException {
         Instant deadline = Instant.now().plus(CREATE_TIMEOUT);
         Operation current = op;
@@ -129,30 +135,35 @@ class GkeTest {
 
     @Test
     @Order(4)
-    void updateMasterUpgradesOnlyTheControlPlane() {
+    void updateMasterUpgradesOnlyTheControlPlane() throws InterruptedException {
         Cluster before = client.getCluster(GetClusterRequest.newBuilder()
                 .setName(CLUSTER_NAME)
                 .build());
+        String target = nextMinor(before.getCurrentMasterVersion()) + ".5-gke.1";
 
         Operation op = client.updateMaster(UpdateMasterRequest.newBuilder()
                 .setName(CLUSTER_NAME)
-                .setMasterVersion("1.31.5-gke.1")
+                .setMasterVersion(target)
                 .build());
 
+        // A real cluster recreates its control plane on the new minor's image, so the operation runs
+        // until the API server is back; a mock cluster's is already DONE.
         assertThat(op.getOperationType()).isEqualTo(Operation.Type.UPGRADE_MASTER);
-        assertThat(op.getStatus()).isEqualTo(Operation.Status.DONE);
+        assertThat(op.getStatus()).isIn(Operation.Status.RUNNING, Operation.Status.DONE);
+        assertThat(awaitDone(op).getStatusMessage()).isEmpty();
 
         Cluster after = client.getCluster(GetClusterRequest.newBuilder()
                 .setName(CLUSTER_NAME)
                 .build());
-        assertThat(after.getCurrentMasterVersion()).isEqualTo("1.31.5-gke.1");
+        assertThat(after.getStatus()).isEqualTo(Cluster.Status.RUNNING);
+        assertThat(after.getCurrentMasterVersion()).isEqualTo(target);
         // Real GKE upgrades the control plane independently of node pools.
         assertThat(after.getCurrentNodeVersion()).isEqualTo(before.getCurrentNodeVersion());
     }
 
     @Test
     @Order(5)
-    void setNodePoolSizeReportsItsOwnOperationType() {
+    void setNodePoolSizeReportsItsOwnOperationType() throws InterruptedException {
         // The generated client parses operationType into the closed Operation.Type enum, so this
         // exercises the decode path, not just the string the emulator writes (#228).
         Operation op = client.setNodePoolSize(SetNodePoolSizeRequest.newBuilder()
@@ -160,8 +171,10 @@ class GkeTest {
                 .setNodeCount(3)
                 .build());
 
+        // A real cluster's resize runs until the new nodes are Ready.
         assertThat(op.getOperationType()).isEqualTo(Operation.Type.SET_NODE_POOL_SIZE);
-        assertThat(op.getStatus()).isEqualTo(Operation.Status.DONE);
+        assertThat(op.getStatus()).isIn(Operation.Status.RUNNING, Operation.Status.DONE);
+        assertThat(awaitDone(op).getStatusMessage()).isEmpty();
 
         NodePool pool = client.getNodePool(CLUSTER_NAME + "/nodePools/default-pool");
         assertThat(pool.getInitialNodeCount()).isEqualTo(3);

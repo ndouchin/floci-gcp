@@ -236,7 +236,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | **IAM Service Account Credentials** | REST JSON | `generateAccessToken` (`iamcredentials.googleapis.com` v1) for service-account impersonation with scopes and lifetime, where tokens are opaque emulator stubs; RSA-signed `generateIdToken`, `signBlob` and `signJwt` |
 | **Security Token Service (STS)** | REST JSON | OAuth 2.0 token exchange at `/v1/token`, including downscoped tokens with GCS Credential Access Boundaries |
 | **Managed Kafka** | REST JSON | Clusters, topics, consumer groups, schema registries; Redpanda-backed or mock mode |
-| **GKE (Kubernetes Engine)** | REST JSON | Clusters, node pools, and operations (`container.googleapis.com` v1); real k3s clusters via Docker (`rancher/k3s`) or mock mode. `remove_default_node_pool` + standalone `google_container_node_pool` (Terraform/OpenTofu) works end to end. Reached by SDKs/gcloud/Terraform through host-based routing (`container.*`) or the `/container/v1` path prefix |
+| **GKE (Kubernetes Engine)** | REST JSON | Clusters, node pools, and operations (`container.googleapis.com` v1); real k3s clusters via Docker (`rancher/k3s`, pinned per Kubernetes minor) whose node pools run as GKE-named, GKE-labelled nodes (GPU pools advertise `nvidia.com/gpu`), with GKE's storage classes, or mock mode. `remove_default_node_pool` + standalone `google_container_node_pool` (Terraform/OpenTofu) works end to end. Reached by SDKs/gcloud/Terraform through host-based routing (`container.*`) or the `/container/v1` path prefix |
 | **[Cloud Run](docs/services/cloud-run.md)** | REST JSON | Services and revisions, Jobs with executions and tasks, Worker Pools with revisions, Instances with `:start`/`:stop`; IAM policies, long-running operations; Docker-backed invocation, job runs, worker replicas and instances on by default (set `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK=true` for control plane only) |
 | **Eventarc** | REST JSON | Trigger CRUD (`eventarc.googleapis.com` v1); delivers CloudEvents from Pub/Sub publishes and GCS object events to Cloud Run and HTTP endpoint destinations |
 | **Cloud Functions** | REST JSON | Functions (including masked updates), IAM policies, source upload URL generation, long-running operations; control plane only, no runtime invocation |
@@ -261,7 +261,7 @@ floci-gcp uses real Docker containers when in-process emulation would reduce fid
 | Managed Kafka | `redpandadata/redpanda:latest`, `apache/kafka:4.3.1` (Connect) | Kafka-compatible broker via Redpanda; a Kafka Connect worker per Connect cluster | `FLOCI_GCP_SERVICES_KAFKA_MOCK` |
 | Cloud SQL for PostgreSQL and MySQL | `postgres:15.18-alpine` (15-18), `mysql:8.0.46` / `mysql:8.4.11` | PostgreSQL or MySQL engine, JDBC-compatible access | `FLOCI_GCP_SERVICES_CLOUDSQL_MOCK` |
 | Cloud Run | User-specified container image | Service and instance request serving, job tasks run to completion, worker pool replicas | `FLOCI_GCP_SERVICES_CLOUDRUN_MOCK` |
-| GKE (Kubernetes Engine) | `rancher/k3s:latest` | Real k3s Kubernetes clusters reachable via kubectl | `FLOCI_GCP_SERVICES_GKE_MOCK` |
+| GKE (Kubernetes Engine) | `rancher/k3s:<release pinned per minor>` | Real k3s Kubernetes clusters reachable via kubectl, on the k3s release of the requested Kubernetes minor (1.32 to 1.37), with one k3s agent per node pool node | `FLOCI_GCP_SERVICES_GKE_MOCK` |
 | BigQuery | `floci/floci-duck:latest` | GoogleSQL queries executed on a DuckDB engine | `FLOCI_GCP_SERVICES_BIGQUERY_MOCK` |
 
 Docker-backed services require the Docker socket:
@@ -285,7 +285,9 @@ docker run -d --name floci-gcp \
 | `FLOCI_GCP_SERVICES_CLOUDSQL_POSTGRES18_IMAGE` | `postgres:18.4-alpine` |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_MYSQL80_IMAGE` | `mysql:8.0.46` |
 | `FLOCI_GCP_SERVICES_CLOUDSQL_MYSQL84_IMAGE` | `mysql:8.4.11` |
-| `FLOCI_GCP_SERVICES_GKE_DEFAULT_IMAGE` | `rancher/k3s:latest` |
+| `FLOCI_GCP_SERVICES_GKE_IMAGE_REPOSITORY` | `rancher/k3s` (tag pinned per Kubernetes minor) |
+| `FLOCI_GCP_SERVICES_GKE_DEFAULT_IMAGE` | _(none; forces one image on every GKE cluster)_ |
+| `FLOCI_GCP_SERVICES_GKE_MAX_NODES_PER_CLUSTER` | `5` (node containers one GKE cluster runs at most) |
 | `FLOCI_GCP_SERVICES_BIGQUERY_DUCK_DEFAULT_IMAGE` | `floci/floci-duck:latest` |
 
 ## Persistence and Storage Modes

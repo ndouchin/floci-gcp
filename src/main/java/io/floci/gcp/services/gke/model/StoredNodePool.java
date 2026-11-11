@@ -40,6 +40,15 @@ public class StoredNodePool {
     private Map<String, Object> upgradeSettings;
     private Map<String, Object> placementPolicy;
     private Map<String, Object> networkConfig;
+    private Map<String, Object> maxPodsConstraint;
+
+    // Emulator-internal (real mode only)
+    private String createTime;
+    private List<StoredNode> nodes;
+    /** Operation finished when the pool's nodes are all Ready. */
+    private String pendingOperation;
+    /** Whether GKE tainted this GPU pool's nodes with {@code nvidia.com/gpu=present:NoSchedule}. */
+    private boolean gpuTaint;
 
     public StoredNodePool() {
     }
@@ -194,5 +203,45 @@ public class StoredNodePool {
 
     public void setNetworkConfig(Map<String, Object> networkConfig) {
         this.networkConfig = networkConfig;
+    }
+
+    public Map<String, Object> getMaxPodsConstraint() {
+        return maxPodsConstraint;
+    }
+
+    public void setMaxPodsConstraint(Map<String, Object> maxPodsConstraint) {
+        this.maxPodsConstraint = maxPodsConstraint;
+    }
+
+    public String getCreateTime() {
+        return createTime;
+    }
+
+    public void setCreateTime(String createTime) {
+        this.createTime = createTime;
+    }
+
+    public List<StoredNode> getNodes() {
+        return nodes;
+    }
+
+    public void setNodes(List<StoredNode> nodes) {
+        this.nodes = nodes;
+    }
+
+    public String getPendingOperation() {
+        return pendingOperation;
+    }
+
+    public void setPendingOperation(String pendingOperation) {
+        this.pendingOperation = pendingOperation;
+    }
+
+    public boolean isGpuTaint() {
+        return gpuTaint;
+    }
+
+    public void setGpuTaint(boolean gpuTaint) {
+        this.gpuTaint = gpuTaint;
     }
 }

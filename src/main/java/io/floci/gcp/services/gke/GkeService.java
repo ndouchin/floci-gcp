@@ -10,6 +10,7 @@ import io.floci.gcp.core.common.ServiceRegistry;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.services.gke.model.StoredCluster;
+import io.floci.gcp.services.gke.model.StoredNode;
 import io.floci.gcp.services.gke.model.StoredNodePool;
 import io.floci.gcp.services.gke.operations.GkeOperationService;
 import io.floci.gcp.services.gke.operations.OperationType;
@@ -23,12 +24,15 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -46,7 +50,6 @@ public class GkeService {
 
     private static final Logger LOG = Logger.getLogger(GkeService.class);
 
-    private static final String DEFAULT_MASTER_VERSION = "1.30.5-gke.1014001";
     private static final String DEFAULT_NODE_POOL_NAME = "default-pool";
     private static final Pattern VALID_CLUSTER_NAME =
             Pattern.compile("^[a-z](?:[a-z0-9-]{0,38}[a-z0-9])?$");
@@ -78,6 +81,16 @@ public class GkeService {
      * one, and the readiness poller's outcome) so a pass that read an older record never writes
      * over a deleted or recreated one. Never held across Docker calls. */
     private final Object lifecycleLock = new Object();
+    /** Serializes the Docker work on one cluster's nodes (reconciles, pool and cluster deletes). Taken
+     * before {@link #lifecycleLock}, never while holding it. */
+    private final Map<String, Object> clusterLocks = new ConcurrentHashMap<>();
+    /** Clusters whose control plane container is being recreated; the readiness poller leaves them
+     * alone until the new container is recorded, since the old one is gone by design. */
+    private final Set<String> replacingControlPlanes = ConcurrentHashMap.newKeySet();
+    /** How many times each cluster's nodes were put out of date, so a reconcile pass that started before
+     * the latest change leaves them out of date. Guarded by {@link #lifecycleLock}. */
+    private final Map<String, Long> nodeChanges = new HashMap<>();
+    private final SecureRandom random = new SecureRandom();
     /** Create operations whose cluster has an unreadable {@code createTime}, already logged once. */
     private final Set<String> unreadableCreateTimes = ConcurrentHashMap.newKeySet();
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -146,7 +159,69 @@ public class GkeService {
         migrateEmbeddedNodePools();
         refreshPersistedNodeVersionAggregates();
         if (!mock()) {
+            poller.schedule(this::restoreRuntime, 1, TimeUnit.SECONDS);
             poller.scheduleAtFixedRate(this::pollReadiness, 2, 3, TimeUnit.SECONDS);
+        }
+    }
+
+    /**
+     * Brings back the control plane of every persisted cluster after an emulator restart (persistent,
+     * hybrid or wal storage; a memory store starts empty). Each cluster goes through
+     * {@code RECONCILING} until its API server answers again, and its CA is read anew, since a cluster
+     * whose data volume is gone starts with a new one. Clusters that had already failed stay as they were.
+     */
+    void restoreRuntime() {
+        for (StoredCluster cluster : clusterStore.scan(k -> true)) {
+            if (cluster.getName() == null || "ERROR".equals(cluster.getStatus())
+                    || "STOPPING".equals(cluster.getStatus())) {
+                continue;
+            }
+            String key = clusterKey(cluster.getProject(), cluster.getLocation(), cluster.getName());
+            StoredCluster probe = new StoredCluster(cluster);
+            String failure = null;
+            GkeClusterManager.RestoreOutcome outcome = null;
+            try {
+                outcome = clusterManager.restoreCluster(probe);
+            } catch (Exception e) {
+                failure = "Could not restore the control plane of cluster " + cluster.getName() + ": " + e.getMessage();
+            }
+            synchronized (lifecycleLock) {
+                StoredCluster current = clusterStore.get(key).orElse(null);
+                if (current == null || !Objects.equals(current.getCreateOperation(), cluster.getCreateOperation())) {
+                    continue;
+                }
+                current.setContainerId(probe.getContainerId());
+                current.setHostPort(probe.getHostPort());
+                current.setEndpoint(probe.getEndpoint());
+                current.setInternalEndpoint(probe.getInternalEndpoint());
+                current.setVolumeName(probe.getVolumeName());
+                current.setNetworkName(probe.getNetworkName());
+                current.setNetworkSubnet(probe.getNetworkSubnet());
+                current.setNetworkGateway(probe.getNetworkGateway());
+                current.setServerIp(probe.getServerIp());
+                if (failure != null) {
+                    current.setStatus("ERROR");
+                    current.setStatusMessage(failure);
+                    operationService.completeOperation(current.getCreateOperation(),
+                            operationError(Status.Code.INTERNAL, failure));
+                    LOG.warnv("GKE cluster {0}: {1}", cluster.getName(), failure);
+                } else {
+                    markNodesOutOfDate(current);
+                    if (!"PROVISIONING".equals(current.getStatus())) {
+                        current.setStatus("RECONCILING");
+                        current.setReconcileSince(Instant.now().toString());
+                        LOG.infov("Restoring GKE cluster {0} ({1})", cluster.getName(), outcome);
+                    }
+                    for (StoredNodePool pool : listNodePools(current.getProject(), current.getLocation(), current.getName())) {
+                        if ("RUNNING".equals(pool.getStatus()) && pool.getInitialNodeCount() > 0) {
+                            pool.setStatus("RECONCILING");
+                            nodePoolStore.put(nodePoolKey(current.getProject(), current.getLocation(),
+                                    current.getName(), pool.getName()), pool);
+                        }
+                    }
+                }
+                clusterStore.put(key, current);
+            }
         }
     }
 
@@ -202,7 +277,7 @@ public class GkeService {
                 // owning cluster, which is where a pool created today gets them from anyway.
                 if (pool.getVersion() == null) {
                     pool.setVersion(cluster.getCurrentNodeVersion() != null
-                            ? cluster.getCurrentNodeVersion() : DEFAULT_MASTER_VERSION);
+                            ? cluster.getCurrentNodeVersion() : defaultVersion());
                 }
                 if (pool.getLocations() == null || pool.getLocations().isEmpty()) {
                     pool.setLocations(cluster.getLocations() != null && !cluster.getLocations().isEmpty()
@@ -266,6 +341,14 @@ public class GkeService {
         // persisted — so an invalid/duplicate name partway through the list can't leave a
         // half-created cluster behind that a retry then finds AlreadyExists against.
         validateNodePoolSpecs(clusterMap.get("nodePools"));
+        Optional<GkeReleases.Channel> channel = GkeReleases.channel(clusterMap.get("releaseChannel"));
+        String requestedVersion = optionalStringField(clusterMap, "initialClusterVersion");
+        String masterVersion = requestedVersion == null ? GkeReleases.defaultRelease(channel).gkeVersion()
+                : resolveVersion("initialClusterVersion", requestedVersion, "Master", channel);
+        validateNodePoolVersions(clusterMap.get("nodePools"), masterVersion, channel);
+        String network = stringField(clusterMap, "network", "default");
+        GkeNetworking.Ranges ranges = GkeNetworking.resolve(clusterMap, defaultMaxPods(clusterMap),
+                takenRanges(project, network));
 
         StoredCluster cluster = new StoredCluster();
         cluster.setName(name);
@@ -274,16 +357,18 @@ public class GkeService {
         cluster.setZone(location);
         cluster.setDescription(stringField(clusterMap, "description", null));
         cluster.setCreateTime(Instant.now().toString());
-        cluster.setCurrentMasterVersion(stringField(clusterMap, "initialClusterVersion", DEFAULT_MASTER_VERSION));
+        cluster.setCurrentMasterVersion(masterVersion);
         // Seeds the pools created below; refreshCurrentNodeVersion then derives the aggregate
         // from them, so pools created with an explicit older version are reflected.
         cluster.setCurrentNodeVersion(cluster.getCurrentMasterVersion());
         cluster.setInitialClusterVersion(cluster.getCurrentMasterVersion());
         Object initialNodeCount = clusterMap.get("initialNodeCount");
         cluster.setInitialNodeCount(initialNodeCount instanceof Number n ? n.intValue() : 3);
-        cluster.setNetwork(stringField(clusterMap, "network", "default"));
+        cluster.setNetwork(network);
         cluster.setSubnetwork(stringField(clusterMap, "subnetwork", "default"));
-        cluster.setClusterIpv4Cidr(stringField(clusterMap, "clusterIpv4Cidr", "10.0.0.0/14"));
+        cluster.setClusterIpv4Cidr(ranges.podCidr());
+        cluster.setServicesIpv4Cidr(ranges.servicesCidr());
+        cluster.setNodePodCidrSize(ranges.nodeMaskSize());
         cluster.setLocations(stringListField(clusterMap, "locations", List.of(location)));
         cluster.setLoggingService(stringField(clusterMap, "loggingService", "logging.googleapis.com/kubernetes"));
         cluster.setMonitoringService(
@@ -294,6 +379,9 @@ public class GkeService {
         cluster.setSelfLink(clusterSelfLink(project, location, name));
         cluster.setEtag(newFingerprint());
         cluster.setExtraConfig(extraFields(clusterMap, TYPED_CLUSTER_FIELDS));
+        if (!ranges.routesBased()) {
+            putExtraConfig(cluster, "ipAllocationPolicy", vpcNativePolicy(clusterMap.get("ipAllocationPolicy"), ranges));
+        }
 
         StoredOperation op;
         String startFailure = null;
@@ -304,6 +392,7 @@ public class GkeService {
             cluster.setCreateOperation(op.getName());
         } else {
             cluster.setStatus("PROVISIONING");
+            cluster.setNodesOutOfDate(true);
             // CREATE_CLUSTER: "The cluster should be assumed to be unusable until the operation
             // finishes" (cluster_service.proto), so the operation stays RUNNING until the readiness
             // poller has the endpoint and CA in place. It exists before the cluster is stored so
@@ -330,6 +419,42 @@ public class GkeService {
         }
         operationService.completeOperation(op.getName(), operationError(Status.Code.INTERNAL, startFailure));
         return operationService.getOperation(project, location, op.getName());
+    }
+
+    /** The {@code ipAllocationPolicy} a VPC-native cluster reports: the request's, with the ranges it got. */
+    private static Map<String, Object> vpcNativePolicy(Object requested, GkeNetworking.Ranges ranges) {
+        Map<String, Object> policy = new LinkedHashMap<>();
+        if (requested instanceof Map<?, ?> m) {
+            m.forEach((k, v) -> policy.put(String.valueOf(k), v));
+        }
+        policy.put("useIpAliases", true);
+        policy.put("clusterIpv4Cidr", ranges.podCidr());
+        policy.put("clusterIpv4CidrBlock", ranges.podCidr());
+        policy.put("servicesIpv4Cidr", ranges.servicesCidr());
+        policy.put("servicesIpv4CidrBlock", ranges.servicesCidr());
+        policy.putIfAbsent("stackType", "IPV4");
+        return policy;
+    }
+
+    /** {@code defaultMaxPodsConstraint.maxPodsPerNode}, else GKE's 110. */
+    private static int defaultMaxPods(Map<String, Object> clusterMap) {
+        Object max = clusterMap.get("defaultMaxPodsConstraint") instanceof Map<?, ?> m ? m.get("maxPodsPerNode") : null;
+        return GkeNodes.intValue(max, GkeNodes.DEFAULT_MAX_PODS);
+    }
+
+    /** Ranges an automatically chosen Pod range avoids: the other clusters' on the network, and the emulator's address. */
+    private List<String> takenRanges(String project, String network) {
+        List<String> taken = new ArrayList<>();
+        for (StoredCluster other : clusterStore.scan(k -> true)) {
+            if (project.equals(other.getProject()) && network.equals(other.getNetwork())) {
+                taken.add(other.getClusterIpv4Cidr());
+                taken.add(other.getServicesIpv4Cidr());
+            }
+        }
+        if (!mock()) {
+            clusterManager.emulatorAddress().ifPresent(taken::add);
+        }
+        return taken;
     }
 
     private static Map<String, Object> operationError(Status.Code code, String message) {
@@ -364,16 +489,20 @@ public class GkeService {
         String key = clusterKey(project, location, clusterId);
         StoredCluster cluster = clusterStore.get(key)
                 .orElseThrow(() -> GcpException.notFound("Not found: cluster " + clusterId));
-        if (!mock()) {
-            clusterManager.stopCluster(cluster);
-        }
-        for (StoredNodePool pool : listNodePools(project, location, clusterId)) {
-            nodePoolStore.delete(nodePoolKey(project, location, clusterId, pool.getName()));
-        }
-        synchronized (lifecycleLock) {
-            clusterStore.delete(key);
-            operationService.completeOperation(cluster.getCreateOperation(), operationError(Status.Code.CANCELLED,
-                    "Cluster " + clusterId + " was deleted before it finished creating"));
+        // The records go while the cluster lock is held, so a node reconcile waiting on it finds no
+        // cluster rather than one whose containers are gone.
+        synchronized (clusterLock(key)) {
+            if (!mock()) {
+                clusterManager.deleteCluster(cluster);
+            }
+            for (StoredNodePool pool : listNodePools(project, location, clusterId)) {
+                nodePoolStore.delete(nodePoolKey(project, location, clusterId, pool.getName()));
+            }
+            synchronized (lifecycleLock) {
+                clusterStore.delete(key);
+                operationService.completeOperation(cluster.getCreateOperation(), operationError(Status.Code.CANCELLED,
+                        "Cluster " + clusterId + " was deleted before it finished creating"));
+            }
         }
         return operationService.createOperation(project, location, clusterId, OperationType.DELETE_CLUSTER);
     }
@@ -388,6 +517,7 @@ public class GkeService {
     public StoredOperation updateCluster(String project, String location, String clusterId,
                                          Map<String, Object> updateMap) {
         StoredCluster cluster = requireCluster(project, location, clusterId);
+        StoredOperation upgrade = null;
         if (updateMap != null) {
             // Both version fields are read through optionalStringField, not a cast: Terraform sends
             // desiredMasterVersion on cluster updates, and {"update": {"desiredMasterVersion": 123}}
@@ -406,7 +536,11 @@ public class GkeService {
             // Same aliases as UpdateMaster; gcloud sends "-" here for `clusters upgrade --master`
             // without --cluster-version, which stored verbatim left the cluster reporting "-".
             String masterVersion = desiredMasterVersion == null ? null
-                    : resolveMasterVersion("desiredMasterVersion", desiredMasterVersion);
+                    : resolveMasterVersion("desiredMasterVersion", desiredMasterVersion, cluster);
+            if (masterVersion != null) {
+                checkMasterUpgrade(cluster.getCurrentMasterVersion(), masterVersion);
+                requireReplaceableControlPlane(cluster, masterVersion);
+            }
             if (nodeVersion != null) {
                 // The pool carries its own `version`, and GetNodePool/ListNodePools read it from
                 // the pool store, so moving only the cluster aggregate would report the new
@@ -422,10 +556,12 @@ public class GkeService {
                         GkeVersions.minimum(poolVersions(project, location, clusterId)).orElse(nodeVersion));
             }
             if (masterVersion != null) {
-                cluster.setCurrentMasterVersion(masterVersion);
+                upgrade = moveControlPlane(project, location, clusterId, cluster, masterVersion,
+                        OperationType.UPDATE_CLUSTER);
             }
             if (updateMap.get("desiredLocations") != null) {
                 cluster.setLocations(stringListField(updateMap, "desiredLocations", cluster.getLocations()));
+                moveNodeLocations(project, location, clusterId, cluster);
             }
             if (desiredLoggingService != null) {
                 cluster.setLoggingService(desiredLoggingService);
@@ -447,6 +583,9 @@ public class GkeService {
         }
         touch(cluster);
         clusterStore.put(clusterKey(project, location, clusterId), cluster);
+        if (upgrade != null) {
+            return upgrade;
+        }
         return operationService.createOperation(project, location, clusterId, OperationType.UPDATE_CLUSTER);
     }
 
@@ -467,10 +606,75 @@ public class GkeService {
         if (masterVersion == null) {
             throw GcpException.invalidArgument("masterVersion is required and must be a string");
         }
-        cluster.setCurrentMasterVersion(resolveMasterVersion("masterVersion", masterVersion));
+        String target = resolveMasterVersion("masterVersion", masterVersion, cluster);
+        checkMasterUpgrade(cluster.getCurrentMasterVersion(), target);
+        requireReplaceableControlPlane(cluster, target);
+        StoredOperation upgrade = moveControlPlane(project, location, clusterId, cluster, target,
+                OperationType.UPGRADE_MASTER);
+        if (upgrade != null) {
+            return upgrade;
+        }
         touch(cluster);
         clusterStore.put(clusterKey(project, location, clusterId), cluster);
         return operationService.createOperation(project, location, clusterId, OperationType.UPGRADE_MASTER);
+    }
+
+    /** A version whose image differs from the running one recreates the control plane, which only
+     * a {@code RUNNING} cluster can do; GKE likewise refuses an upgrade while another operation runs. */
+    private void requireReplaceableControlPlane(StoredCluster cluster, String target) {
+        if (needsNewControlPlane(cluster, target) && !"RUNNING".equals(cluster.getStatus())) {
+            throw GcpException.failedPrecondition("Cluster " + cluster.getName() + " is " + cluster.getStatus()
+                    + "; its control plane can only be upgraded while it is RUNNING.");
+        }
+    }
+
+    private boolean needsNewControlPlane(StoredCluster cluster, String target) {
+        return !mock() && !clusterManager.imageFor(target).equals(clusterManager.imageFor(cluster.getCurrentMasterVersion()));
+    }
+
+    /** Sets the control plane version. When the version runs on another k3s image the control plane
+     * container is recreated on it, keeping its data volume, and the returned operation stays
+     * {@code RUNNING} while the cluster is {@code RECONCILING}, until its API server answers again.
+     * Returns null when only the recorded version changes. */
+    private StoredOperation moveControlPlane(String project, String location, String clusterId, StoredCluster cluster,
+                                             String target, OperationType type) {
+        boolean replace = needsNewControlPlane(cluster, target);
+        cluster.setCurrentMasterVersion(target);
+        if (!replace) {
+            return null;
+        }
+        touch(cluster);
+        StoredOperation op = operationService.createRunningOperation(project, location, clusterId, type);
+        String key = clusterKey(project, location, clusterId);
+        replacingControlPlanes.add(key);
+        try {
+            synchronized (clusterLock(key)) {
+                synchronized (lifecycleLock) {
+                    cluster.setStatus("RECONCILING");
+                    cluster.setReconcileSince(Instant.now().toString());
+                    cluster.setPendingOperation(op.getName());
+                    clusterStore.put(key, cluster);
+                }
+                try {
+                    clusterManager.replaceControlPlane(cluster);
+                    clusterStore.put(key, cluster);
+                } catch (Exception e) {
+                    String failure = "Could not upgrade the control plane of cluster " + clusterId + ": "
+                            + e.getMessage();
+                    synchronized (lifecycleLock) {
+                        cluster.setStatus("ERROR");
+                        cluster.setStatusMessage(failure);
+                        cluster.setReconcileSince(null);
+                        cluster.setPendingOperation(null);
+                        clusterStore.put(key, cluster);
+                    }
+                    operationService.completeOperation(op.getName(), operationError(Status.Code.INTERNAL, failure));
+                }
+            }
+        } finally {
+            replacingControlPlanes.remove(key);
+        }
+        return operationService.getOperation(project, location, op.getName());
     }
 
     public StoredOperation setLabels(String project, String location, String clusterId,
@@ -532,6 +736,7 @@ public class GkeService {
                                         Map<String, Object> body) {
         StoredCluster cluster = requireCluster(project, location, clusterId);
         cluster.setLocations(stringListField(body == null ? Map.of() : body, "locations", cluster.getLocations()));
+        moveNodeLocations(project, location, clusterId, cluster);
         touch(cluster);
         clusterStore.put(clusterKey(project, location, clusterId), cluster);
         return operationService.createOperation(project, location, clusterId, OperationType.UPDATE_CLUSTER);
@@ -592,28 +797,31 @@ public class GkeService {
     }
 
     /** {@code container.v1.ClusterManager.GetServerConfig} — the version/channel info gcloud
-     * and some SDKs check before create/upgrade calls. Versions are pinned to this emulator's
-     * single supported master/node version; there is no real multi-version fleet to report. */
+     * and some SDKs check before create/upgrade calls. Every version listed is one the emulator can
+     * run: one per Kubernetes minor {@link GkeReleases} pins a k3s release for. The default is the
+     * REGULAR channel's, as on GKE. */
     public Map<String, Object> getServerConfig() {
         Map<String, Object> config = new HashMap<>();
-        config.put("defaultClusterVersion", DEFAULT_MASTER_VERSION);
-        config.put("validNodeVersions", List.of(DEFAULT_MASTER_VERSION));
+        config.put("defaultClusterVersion", GkeReleases.defaultRelease(Optional.empty()).gkeVersion());
+        config.put("validNodeVersions", GkeReleases.validNodeVersions());
         config.put("defaultImageType", "COS_CONTAINERD");
         config.put("validImageTypes", List.of("COS_CONTAINERD", "UBUNTU_CONTAINERD"));
-        config.put("validMasterVersions", List.of(DEFAULT_MASTER_VERSION));
-        config.put("channels", List.of(
-                releaseChannelConfig("RAPID"),
-                releaseChannelConfig("REGULAR"),
-                releaseChannelConfig("STABLE")));
+        config.put("validMasterVersions", GkeReleases.validMasterVersions());
+        List<Map<String, Object>> channels = new ArrayList<>();
+        for (GkeReleases.Channel channel : GkeReleases.Channel.values()) {
+            channels.add(releaseChannelConfig(channel));
+        }
+        config.put("channels", channels);
         return config;
     }
 
-    private Map<String, Object> releaseChannelConfig(String channel) {
+    private Map<String, Object> releaseChannelConfig(GkeReleases.Channel channel) {
+        String defaultVersion = GkeReleases.defaultRelease(Optional.of(channel)).gkeVersion();
         Map<String, Object> config = new HashMap<>();
-        config.put("channel", channel);
-        config.put("defaultVersion", DEFAULT_MASTER_VERSION);
-        config.put("validVersions", List.of(DEFAULT_MASTER_VERSION));
-        config.put("upgradeTargetVersion", DEFAULT_MASTER_VERSION);
+        config.put("channel", channel.name());
+        config.put("defaultVersion", defaultVersion);
+        config.put("validVersions", GkeReleases.channelVersions(channel));
+        config.put("upgradeTargetVersion", defaultVersion);
         return config;
     }
 
@@ -687,8 +895,55 @@ public class GkeService {
         StoredNodePool pool = createNodePoolInternal(project, location, clusterId, nodePoolMap);
         logIgnoredBetaFields("node pool " + pool.getName(), GkeBetaFields.setOnNodePool(nodePoolMap));
         refreshCurrentNodeVersion(project, location, clusterId, cluster);
-        return operationService.createNodePoolOperation(
-                project, location, clusterId, pool.getName(), OperationType.CREATE_NODE_POOL);
+        if (mock()) {
+            return operationService.createNodePoolOperation(
+                    project, location, clusterId, pool.getName(), OperationType.CREATE_NODE_POOL);
+        }
+        return awaitNodes(project, location, clusterId, pool, OperationType.CREATE_NODE_POOL);
+    }
+
+    /** Hands a pool whose nodes must change to the reconciler, with an operation that stays {@code RUNNING}
+     * until they are all Ready. */
+    private StoredOperation awaitNodes(String project, String location, String clusterId, StoredNodePool pool,
+                                       OperationType type) {
+        StoredOperation op = operationService.createRunningNodePoolOperation(project, location, clusterId,
+                pool.getName(), type);
+        String clusterKey = clusterKey(project, location, clusterId);
+        synchronized (lifecycleLock) {
+            operationService.completeOperation(pool.getPendingOperation(), null);
+            pool.setPendingOperation(op.getName());
+            if (!"PROVISIONING".equals(pool.getStatus())) {
+                pool.setStatus("RECONCILING");
+            }
+            nodePoolStore.put(nodePoolKey(project, location, clusterId, pool.getName()), pool);
+            clusterStore.get(clusterKey).ifPresent(cluster -> {
+                markNodesOutOfDate(cluster);
+                clusterStore.put(clusterKey, cluster);
+            });
+        }
+        return op;
+    }
+
+    /** {@code SetLocations} and {@code desiredLocations} move every node pool to the cluster's new node locations. */
+    private void moveNodeLocations(String project, String location, String clusterId, StoredCluster cluster) {
+        for (StoredNodePool pool : listNodePools(project, location, clusterId)) {
+            pool.setLocations(cluster.getLocations() == null ? List.of(location) : List.copyOf(cluster.getLocations()));
+            pool.setInstanceGroupUrls(instanceGroupUrls(project, location, clusterId, pool));
+            if (!mock() && !"PROVISIONING".equals(pool.getStatus())) {
+                pool.setStatus("RECONCILING");
+            }
+            nodePoolStore.put(nodePoolKey(project, location, clusterId, pool.getName()), pool);
+        }
+        if (!mock()) {
+            markNodesOutOfDate(cluster);
+        }
+    }
+
+    private static List<String> instanceGroupUrls(String project, String location, String clusterId,
+                                                  StoredNodePool pool) {
+        return GkeNodes.zones(pool.getLocations(), location).stream()
+                .map(zone -> GkeNodes.instanceGroupUrl(project, zone, clusterId, pool.getName()))
+                .toList();
     }
 
     public StoredNodePool getNodePool(String project, String location, String clusterId, String nodePoolId) {
@@ -705,8 +960,20 @@ public class GkeService {
 
     public StoredOperation deleteNodePool(String project, String location, String clusterId, String nodePoolId) {
         String key = nodePoolKey(project, location, clusterId, nodePoolId);
-        if (nodePoolStore.get(key).isEmpty()) {
-            throw GcpException.notFound("Not found: nodePool " + nodePoolId);
+        StoredNodePool doomed = nodePoolStore.get(key)
+                .orElseThrow(() -> GcpException.notFound("Not found: nodePool " + nodePoolId));
+        String clusterKey = clusterKey(project, location, clusterId);
+        if (!mock()) {
+            synchronized (clusterLock(clusterKey)) {
+                removeNodes(clusterStore.get(clusterKey).orElse(null), doomed.getNodes());
+                nodePoolStore.delete(key);
+                clusterStore.get(clusterKey).ifPresent(cluster -> {
+                    markNodesOutOfDate(cluster);
+                    clusterStore.put(clusterKey, cluster);
+                });
+            }
+            operationService.completeOperation(doomed.getPendingOperation(), operationError(Status.Code.CANCELLED,
+                    "Node pool " + nodePoolId + " was deleted"));
         }
         nodePoolStore.delete(key);
         clusterStore.get(clusterKey(project, location, clusterId))
@@ -727,10 +994,13 @@ public class GkeService {
                                           Map<String, Object> body) {
         StoredCluster cluster = requireCluster(project, location, clusterId);
         StoredNodePool pool = requireNodePool(project, location, clusterId, nodePoolId);
+        boolean newImage = false;
         if (body != null) {
             String nodeVersion = optionalStringField(body, "nodeVersion");
             if (nodeVersion != null) {
-                pool.setVersion(resolveNodeVersion("nodeVersion", nodeVersion, cluster));
+                String resolved = resolveNodeVersion("nodeVersion", nodeVersion, cluster);
+                newImage = !mock() && !clusterManager.imageFor(resolved).equals(clusterManager.imageFor(pool.getVersion()));
+                pool.setVersion(resolved);
             }
             if (body.get("upgradeSettings") != null) {
                 pool.setUpgradeSettings(asMap(body.get("upgradeSettings")));
@@ -739,6 +1009,9 @@ public class GkeService {
         pool.setEtag(newFingerprint());
         nodePoolStore.put(nodePoolKey(project, location, clusterId, nodePoolId), pool);
         refreshCurrentNodeVersion(project, location, clusterId, cluster);
+        if (newImage) {
+            return awaitNodes(project, location, clusterId, pool, OperationType.UPGRADE_NODES);
+        }
         return operationService.createNodePoolOperation(
                 project, location, clusterId, nodePoolId, OperationType.UPGRADE_NODES);
     }
@@ -767,11 +1040,18 @@ public class GkeService {
                                            String nodePoolId, Map<String, Object> body) {
         StoredNodePool pool = requireNodePool(project, location, clusterId, nodePoolId);
         Object nodeCount = body == null ? null : body.get("nodeCount");
+        if (nodeCount instanceof Number n && n.intValue() < 0) {
+            throw GcpException.invalidArgument("nodeCount must not be negative");
+        }
+        boolean resized = nodeCount instanceof Number n && n.intValue() != pool.getInitialNodeCount();
         if (nodeCount instanceof Number n) {
             pool.setInitialNodeCount(n.intValue());
         }
         pool.setEtag(newFingerprint());
         nodePoolStore.put(nodePoolKey(project, location, clusterId, nodePoolId), pool);
+        if (resized && !mock()) {
+            return awaitNodes(project, location, clusterId, pool, OperationType.SET_NODE_POOL_SIZE);
+        }
         return operationService.createNodePoolOperation(
                 project, location, clusterId, nodePoolId, OperationType.SET_NODE_POOL_SIZE);
     }
@@ -815,6 +1095,23 @@ public class GkeService {
             }
             if (!seen.add(poolName)) {
                 throw GcpException.alreadyExists("Already exists: nodePool " + poolName);
+            }
+        }
+    }
+
+    /** Resolves the explicit {@code version} of every create-time node pool against the control plane
+     * version before anything is persisted, so a pool GKE would reject fails the whole create. */
+    private static void validateNodePoolVersions(Object requestedPools, String masterVersion,
+                                                 Optional<GkeReleases.Channel> channel) {
+        if (!(requestedPools instanceof List<?> list)) {
+            return;
+        }
+        for (Object poolObj : list) {
+            if (poolObj instanceof Map<?, ?> poolMap && poolMap.get("version") instanceof String version
+                    && !version.isBlank()) {
+                String resolved = "-".equals(version) ? masterVersion
+                        : resolveVersion("version", version, "Node", channel);
+                checkNodeSkew(resolved, masterVersion);
             }
         }
     }
@@ -866,22 +1163,34 @@ public class GkeService {
         pool.setClusterId(clusterId);
         Object initialNodeCount = poolMap.get("initialNodeCount");
         pool.setInitialNodeCount(initialNodeCount instanceof Number n ? n.intValue() : 3);
-        pool.setLocations(stringListField(poolMap, "locations", List.of(location)));
+        List<String> clusterLocations = clusterStore.get(clusterKey(project, location, clusterId))
+                .map(StoredCluster::getLocations)
+                .filter(l -> l != null && !l.isEmpty())
+                .orElse(List.of(location));
+        pool.setLocations(stringListField(poolMap, "locations", List.copyOf(clusterLocations)));
         // Default the version from the owning cluster, not the build-time constant: after an
         // UpdateCluster carrying desiredNodeVersion, the cluster and its existing pools have
-        // moved off DEFAULT_MASTER_VERSION, and a pool created afterwards without an explicit
+        // moved off the default version, and a pool created afterwards without an explicit
         // version would otherwise come back on the old one and read as drift.
         String clusterNodeVersion = clusterStore.get(clusterKey(project, location, clusterId))
                 .map(StoredCluster::getCurrentNodeVersion)
                 .filter(v -> v != null && !v.isBlank())
-                .orElse(DEFAULT_MASTER_VERSION);
-        pool.setVersion(stringField(poolMap, "version", clusterNodeVersion));
-        pool.setStatus("RUNNING");
+                .orElse(defaultVersion());
+        String requestedVersion = optionalStringField(poolMap, "version");
+        pool.setVersion(requestedVersion == null ? clusterNodeVersion
+                : clusterStore.get(clusterKey(project, location, clusterId))
+                        .map(cluster -> resolveNodeVersion("version", requestedVersion, cluster))
+                        .orElse(requestedVersion));
+        pool.setStatus(mock() ? "RUNNING" : "PROVISIONING");
+        pool.setCreateTime(Instant.now().toString());
         pool.setSelfLink(nodePoolSelfLink(project, location, clusterId, name));
         pool.setEtag(newFingerprint());
-        pool.setInstanceGroupUrls(List.of());
+        pool.setInstanceGroupUrls(instanceGroupUrls(project, location, clusterId, pool));
+        pool.setMaxPodsConstraint(asMap(poolMap.get("maxPodsConstraint")));
         pool.setConditions(List.of());
         pool.setConfig(asMap(poolMap.get("config")));
+        pool.setGpuTaint(GkeNodes.hasGpus(pool.getConfig()) && listNodePools(project, location, clusterId).stream()
+                .anyMatch(other -> !GkeNodes.hasGpus(other.getConfig())));
         pool.setAutoscaling(asMap(poolMap.get("autoscaling")));
         pool.setManagement(asMap(poolMap.get("management")));
         pool.setUpgradeSettings(asMap(poolMap.get("upgradeSettings")));
@@ -936,38 +1245,46 @@ public class GkeService {
     }
 
     /** Resolves the version spellings {@code master_version} accepts (cluster_service.proto,
-     * {@code UpdateMasterRequest}): {@code "latest"} and {@code "-"} pick the highest valid and
-     * the default version respectively, and {@code "1.X"} / {@code "1.X.Y"} pick the highest
-     * valid version under that prefix. {@link #getServerConfig()} advertises exactly one valid
-     * master version, so every alias that matches it resolves to it. An explicit
-     * {@code 1.X.Y-gke.N} that is not the advertised one is kept verbatim, as {@code createCluster}
-     * and {@code UpdateCluster} already do, so clients pinning a specific version keep working
-     * against the emulator. A {@code 1.X} / {@code 1.X.Y} alias that matches no valid version is
-     * rejected (#231): the alias means "the highest valid version under this prefix", and when
-     * there is none there is nothing to pick, so storing it would make the emulator report a
-     * version its own {@code getServerConfig()} does not consider valid.
+     * {@code UpdateMasterRequest}): {@code "latest"} and {@code "-"} pick the highest valid and the
+     * default version of the cluster's release channel (REGULAR without one), and {@code "1.X"} /
+     * {@code "1.X.Y"} pick the version {@link GkeReleases} advertises for that minor when it matches.
+     * An explicit {@code 1.X.Y-gke.N} of a supported minor is kept verbatim even when it is not the
+     * advertised one, so clients pinning a specific version keep working; it runs on that minor's
+     * image. A supported minor is one {@link GkeReleases} pins a k3s release for; anything else is
+     * rejected the way GKE rejects a retired version.
      *
      * <p>Anything outside those five shapes is rejected. The prefix test alone would also accept
      * a bare major ({@code "1"} is a character prefix of {@code "1.30..."}), which the field does
-     * not document and real GKE rejects. {@code field} is the request field the value came from
-     * (four callers share this), so the rejection names the field the client actually sent. */
-    private static String resolveMasterVersion(String field, String requested) {
-        if ("latest".equals(requested) || "-".equals(requested)) {
-            return DEFAULT_MASTER_VERSION;
+     * not document and real GKE rejects. {@code field} is the request field the value came from,
+     * so the rejection names the field the client actually sent. */
+    private static String resolveVersion(String field, String requested, String kind,
+                                         Optional<GkeReleases.Channel> channel) {
+        if ("latest".equals(requested)) {
+            return GkeReleases.latestRelease(channel).gkeVersion();
+        }
+        if ("-".equals(requested)) {
+            return GkeReleases.defaultRelease(channel).gkeVersion();
         }
         if (VERSION_PREFIX_ALIAS.matcher(requested).matches()) {
-            if (DEFAULT_MASTER_VERSION.startsWith(requested + ".")
-                    || DEFAULT_MASTER_VERSION.startsWith(requested + "-")) {
-                return DEFAULT_MASTER_VERSION;
+            Optional<GkeReleases.Release> release = GkeReleases.forVersion(requested);
+            if (release.isPresent() && (requested.equals(release.get().minorVersion())
+                    || release.get().gkeVersion().startsWith(requested + "-"))) {
+                return release.get().gkeVersion();
             }
-            throw GcpException.invalidArgument("Invalid " + field + " \"" + requested
-                    + "\": no valid version matches this alias (valid: " + DEFAULT_MASTER_VERSION + ")");
+            throw GcpException.invalidArgument("No valid versions with the prefix \"" + requested + "\" found.");
         }
         if (EXPLICIT_VERSION.matcher(requested).matches()) {
-            return requested;
+            if (GkeReleases.forVersion(requested).isPresent()) {
+                return requested;
+            }
+            throw GcpException.invalidArgument(kind + " version \"" + requested + "\" is unsupported.");
         }
         throw GcpException.invalidArgument("Invalid " + field + " \"" + requested
                 + "\": expected \"latest\", \"-\", \"1.X\", \"1.X.Y\" or \"1.X.Y-gke.N\"");
+    }
+
+    private static String resolveMasterVersion(String field, String requested, StoredCluster cluster) {
+        return resolveVersion(field, requested, "Master", channelOf(cluster));
     }
 
     /** {@code desired_node_version} documents the same spellings as {@code master_version}
@@ -976,7 +1293,55 @@ public class GkeService {
      * field. The proto allows one {@code ClusterUpdate} field per request, so this reads the
      * master version as stored, not one the same request might also be changing. */
     private static String resolveNodeVersion(String field, String requested, StoredCluster cluster) {
-        return "-".equals(requested) ? cluster.getCurrentMasterVersion() : resolveMasterVersion(field, requested);
+        String version = "-".equals(requested) ? cluster.getCurrentMasterVersion()
+                : resolveVersion(field, requested, "Node", channelOf(cluster));
+        checkNodeSkew(version, cluster.getCurrentMasterVersion());
+        return version;
+    }
+
+    /** Nodes never run a newer minor than the control plane, nor one more than two minors older
+     * (GKE "Upgrade a cluster": control planes are compatible with nodes up to two minor versions
+     * earlier). Versions the emulator cannot parse are left alone. */
+    private static void checkNodeSkew(String nodeVersion, String masterVersion) {
+        int node = GkeReleases.minorOf(nodeVersion);
+        int master = GkeReleases.minorOf(masterVersion);
+        if (node < 0 || master < 0) {
+            return;
+        }
+        if (node > master) {
+            throw GcpException.invalidArgument("Node version \"" + nodeVersion
+                    + "\" must not be newer than the control plane version \"" + masterVersion + "\".");
+        }
+        if (master - node > 2) {
+            throw GcpException.invalidArgument("Node version \"" + nodeVersion
+                    + "\" is more than two minor versions older than the control plane version \""
+                    + masterVersion + "\".");
+        }
+    }
+
+    /** The control plane moves up one minor at a time and never down a minor; a patch downgrade
+     * within its minor is allowed (GKE "Upgrade a cluster"). A cluster still on a minor this build no
+     * longer supports may move to any supported one. */
+    private static void checkMasterUpgrade(String current, String target) {
+        int from = GkeReleases.minorOf(current);
+        int to = GkeReleases.minorOf(target);
+        if (from < 0 || to < 0 || GkeReleases.forMinor(from).isEmpty()) {
+            return;
+        }
+        if (to < from) {
+            throw GcpException.invalidArgument("Master cannot be upgraded to \"" + target
+                    + "\": specified version is not newer than the current version.");
+        }
+        if (to > from + 1) {
+            throw GcpException.invalidArgument("Master cannot be upgraded to \"" + target
+                    + "\": the control plane can only be upgraded one minor version at a time, and it runs \""
+                    + current + "\".");
+        }
+    }
+
+    private static Optional<GkeReleases.Channel> channelOf(StoredCluster cluster) {
+        return GkeReleases.channel(cluster.getExtraConfig() == null ? null
+                : cluster.getExtraConfig().get("releaseChannel"));
     }
 
     /** The node pools an {@code UpdateCluster} carrying {@code desiredNodeVersion} upgrades.
@@ -1039,7 +1404,9 @@ public class GkeService {
 
     void pollReadiness() {
         for (StoredCluster cluster : clusterStore.scan(k -> true)) {
-            if ("PROVISIONING".equals(cluster.getStatus())) {
+            if (("PROVISIONING".equals(cluster.getStatus()) || "RECONCILING".equals(cluster.getStatus()))
+                    && !replacingControlPlanes.contains(
+                            clusterKey(cluster.getProject(), cluster.getLocation(), cluster.getName()))) {
                 try {
                     pollCluster(cluster);
                 } catch (Exception e) {
@@ -1047,6 +1414,291 @@ public class GkeService {
                 }
             }
         }
+        for (StoredCluster cluster : clusterStore.scan(k -> true)) {
+            if ("RUNNING".equals(cluster.getStatus())) {
+                try {
+                    reconcileNodes(cluster.getProject(), cluster.getLocation(), cluster.getName());
+                } catch (Exception e) {
+                    LOG.errorv(e, "Error reconciling the nodes of GKE cluster {0}", cluster.getName());
+                }
+            }
+        }
+    }
+
+    private Object clusterLock(String clusterKey) {
+        return clusterLocks.computeIfAbsent(clusterKey, k -> new Object());
+    }
+
+    private void markNodesOutOfDate(StoredCluster cluster) {
+        synchronized (lifecycleLock) {
+            cluster.setNodesOutOfDate(true);
+            nodeChanges.merge(clusterKey(cluster.getProject(), cluster.getLocation(), cluster.getName()), 1L, Long::sum);
+        }
+    }
+
+    private long nodeChanges(String clusterKey) {
+        synchronized (lifecycleLock) {
+            return nodeChanges.getOrDefault(clusterKey, 0L);
+        }
+    }
+
+    /** Node pools in the order the node cap serves them: the default pool first, then by creation. */
+    private List<StoredNodePool> orderedPools(String project, String location, String clusterId) {
+        return listNodePools(project, location, clusterId).stream()
+                .sorted(Comparator.comparing((StoredNodePool p) -> !GkeNodes.DEFAULT_POOL.equals(p.getName()))
+                        .thenComparing(p -> p.getCreateTime() == null ? "" : p.getCreateTime())
+                        .thenComparing(StoredNodePool::getName))
+                .toList();
+    }
+
+    /**
+     * Brings a running cluster's node containers in line with its node pools, then moves pools whose
+     * nodes are all Ready to {@code RUNNING}. Nothing happens for a cluster whose pools are all
+     * {@code RUNNING} and whose nodes nobody changed. Runs on the poller thread.
+     */
+    void reconcileNodes(String project, String location, String clusterId) {
+        if (mock()) {
+            return;
+        }
+        String key = clusterKey(project, location, clusterId);
+        synchronized (clusterLock(key)) {
+            StoredCluster cluster = clusterStore.get(key).orElse(null);
+            if (cluster == null || !"RUNNING".equals(cluster.getStatus())) {
+                return;
+            }
+            long changes = nodeChanges(key);
+            List<StoredNodePool> pools = orderedPools(project, location, clusterId);
+            if (cluster.isNodesOutOfDate() && !applyNodePlan(cluster, pools, changes)) {
+                return;
+            }
+            if (clusterStore.get(key).map(StoredCluster::isNodesOutOfDate).orElse(true)) {
+                return;
+            }
+            settleNodePools(cluster, orderedPools(project, location, clusterId));
+        }
+    }
+
+    /** Creates, adopts and removes node containers so each pool runs its share of the node cap. False
+     * when the control plane cannot hand out its join token yet. */
+    private boolean applyNodePlan(StoredCluster cluster, List<StoredNodePool> pools, long changes) {
+        String project = cluster.getProject();
+        String location = cluster.getLocation();
+        String clusterId = cluster.getName();
+        String token = clusterManager.readToken(cluster);
+        if (token == null) {
+            return false;
+        }
+        if (cluster.getK3sToken() != null && !token.equals(cluster.getK3sToken())) {
+            LOG.warnv("The control plane of GKE cluster {0} started over with a new identity; recreating its nodes",
+                    clusterId);
+            for (StoredNodePool pool : pools) {
+                removeNodes(cluster, pool.getNodes());
+                pool.setNodes(new ArrayList<>());
+                nodePoolStore.put(nodePoolKey(project, location, clusterId, pool.getName()), pool);
+            }
+        }
+        cluster.setK3sToken(token);
+
+        List<GkeNodes.PoolDemand> demands = pools.stream()
+                .map(p -> new GkeNodes.PoolDemand(p.getName(), p.getInitialNodeCount(),
+                        GkeNodes.zones(p.getLocations(), location)))
+                .toList();
+        int cap = config.services().gke().maxNodesPerCluster();
+        List<GkeNodes.PoolAllocation> allocations = GkeNodes.allocate(demands, cap);
+        Set<String> keep = new HashSet<>();
+        List<String> shortPools = new ArrayList<>();
+        for (int i = 0; i < pools.size(); i++) {
+            StoredNodePool pool = pools.get(i);
+            GkeNodes.PoolAllocation allocation = allocations.get(i);
+            if (allocation.shortOfNodes()) {
+                shortPools.add(pool.getName() + " (" + allocation.nodeZones().size() + " of " + allocation.requested() + ")");
+            }
+            reconcilePool(cluster, pool, allocation.nodeZones());
+            for (StoredNode node : pool.getNodes()) {
+                keep.add(node.getContainerName());
+            }
+        }
+        clusterManager.removeNodeContainers(cluster, keep);
+        if (!shortPools.isEmpty()) {
+            LOG.warnv("GKE cluster {0} runs at most {1} node containers (floci-gcp.services.gke.max-nodes-per-cluster); "
+                    + "these node pools run fewer nodes than they report: {2}", clusterId, String.valueOf(cap),
+                    String.join(", ", shortPools));
+        }
+        String key = clusterKey(project, location, clusterId);
+        synchronized (lifecycleLock) {
+            clusterStore.get(key).ifPresent(current -> {
+                current.setK3sToken(token);
+                current.setNodesOutOfDate(nodeChanges(key) != changes);
+                clusterStore.put(key, current);
+            });
+        }
+        return true;
+    }
+
+    /** Keeps the pool's live nodes that match its version and zones, removes the rest, and starts the missing ones. */
+    private void reconcilePool(StoredCluster cluster, StoredNodePool pool, List<String> zones) {
+        String poolKey = nodePoolKey(cluster.getProject(), cluster.getLocation(), cluster.getName(), pool.getName());
+        String image = clusterManager.imageFor(pool.getVersion());
+        Map<String, Integer> wanted = new LinkedHashMap<>();
+        zones.forEach(zone -> wanted.merge(zone, 1, Integer::sum));
+        List<StoredNode> kept = new ArrayList<>();
+        List<StoredNode> dropped = new ArrayList<>();
+        for (StoredNode node : pool.getNodes() == null ? List.<StoredNode>of() : pool.getNodes()) {
+            int room = wanted.getOrDefault(node.getZone(), 0);
+            if (room > 0 && image.equals(node.getImage()) && clusterManager.adoptNode(node)) {
+                kept.add(node);
+                wanted.put(node.getZone(), room - 1);
+            } else {
+                dropped.add(node);
+            }
+        }
+        removeNodes(cluster, dropped);
+        boolean changed = !dropped.isEmpty();
+        pool.setNodes(new ArrayList<>(kept));
+        GkeClusterManager.HostResources host = clusterManager.hostResources();
+        for (Map.Entry<String, Integer> slot : wanted.entrySet()) {
+            for (int i = 0; i < slot.getValue(); i++) {
+                String zone = slot.getKey();
+                String hash = GkeNodes.instanceGroupHash(cluster.getProject(), cluster.getName(), pool.getName(), zone);
+                StoredNode node = new StoredNode(GkeNodes.nodeName(cluster.getName(), pool.getName(), hash,
+                        uniqueSuffix(pool)), zone);
+                GkeNodes.NodeSpec spec = GkeNodes.spec(cluster.getProject(), pool.getName(), zone, node.getName(),
+                        pool.getConfig(), maxPods(cluster, pool), pool.isGpuTaint(), host.cpus(), host.memoryBytes());
+                pool.getNodes().add(node);
+                try {
+                    clusterManager.startNode(cluster, node, new GkeClusterManager.NodeLaunch(pool.getName(), image, spec));
+                } catch (Exception e) {
+                    pool.getNodes().remove(node);
+                    removeNodes(cluster, List.of(node));
+                    failPool(cluster, pool, "Could not start node " + node.getName() + ": " + e.getMessage());
+                    return;
+                }
+                changed = true;
+                nodePoolStore.put(poolKey, pool);
+            }
+        }
+        if (changed && "RUNNING".equals(pool.getStatus())) {
+            pool.setStatus("RECONCILING");
+        }
+        nodePoolStore.put(poolKey, pool);
+    }
+
+    private String uniqueSuffix(StoredNodePool pool) {
+        String alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+        while (true) {
+            StringBuilder suffix = new StringBuilder();
+            for (int i = 0; i < 4; i++) {
+                suffix.append(alphabet.charAt(random.nextInt(alphabet.length())));
+            }
+            String candidate = suffix.toString();
+            if (pool.getNodes() == null || pool.getNodes().stream().noneMatch(n -> n.getName().endsWith("-" + candidate))) {
+                return candidate;
+            }
+        }
+    }
+
+    private static int maxPods(StoredCluster cluster, StoredNodePool pool) {
+        Object poolMax = pool.getMaxPodsConstraint() == null ? null : pool.getMaxPodsConstraint().get("maxPodsPerNode");
+        Object clusterMax = cluster.getExtraConfig() != null
+                && cluster.getExtraConfig().get("defaultMaxPodsConstraint") instanceof Map<?, ?> m
+                ? m.get("maxPodsPerNode") : null;
+        return GkeNodes.intValue(poolMax, GkeNodes.intValue(clusterMax, GkeNodes.DEFAULT_MAX_PODS));
+    }
+
+    private void removeNodes(StoredCluster cluster, List<StoredNode> nodes) {
+        if (nodes == null || nodes.isEmpty()) {
+            return;
+        }
+        List<String> names = new ArrayList<>();
+        for (StoredNode node : nodes) {
+            try {
+                clusterManager.removeNode(node);
+            } catch (Exception e) {
+                LOG.warnv("Could not remove the container of node {0}: {1}", node.getName(), e.getMessage());
+            }
+            names.add(node.getName());
+        }
+        if (cluster != null && "RUNNING".equals(cluster.getStatus())) {
+            try {
+                clusterManager.deleteKubernetesNodes(cluster, names);
+            } catch (Exception e) {
+                LOG.warnv("Could not delete nodes {0} from GKE cluster {1}: {2}", names, cluster.getName(), e.getMessage());
+            }
+        }
+    }
+
+    private void failPool(StoredCluster cluster, StoredNodePool pool, String failure) {
+        LOG.warnv("Node pool {0} of GKE cluster {1}: {2}", pool.getName(), cluster.getName(), failure);
+        pool.setStatus("ERROR");
+        pool.setStatusMessage(failure);
+        String pending = pool.getPendingOperation();
+        pool.setPendingOperation(null);
+        nodePoolStore.put(nodePoolKey(cluster.getProject(), cluster.getLocation(), cluster.getName(), pool.getName()), pool);
+        operationService.completeOperation(pending, operationError(Status.Code.INTERNAL, failure));
+    }
+
+    /** Moves each provisioning or reconciling pool to {@code RUNNING} once every one of its nodes is Ready. */
+    private void settleNodePools(StoredCluster cluster, List<StoredNodePool> pools) {
+        List<StoredNodePool> waiting = pools.stream()
+                .filter(p -> "PROVISIONING".equals(p.getStatus()) || "RECONCILING".equals(p.getStatus()))
+                .toList();
+        if (waiting.isEmpty()) {
+            return;
+        }
+        Map<String, GkeClusterManager.NodeState> states = null;
+        for (StoredNodePool pool : waiting) {
+            List<StoredNode> nodes = pool.getNodes() == null ? List.of() : pool.getNodes();
+            if (!nodes.isEmpty()) {
+                if (states == null) {
+                    states = clusterManager.nodeStates(cluster);
+                    if (states == null) {
+                        return;
+                    }
+                }
+                if (!nodesReady(cluster, pool, nodes, states)) {
+                    continue;
+                }
+            }
+            String pending = pool.getPendingOperation();
+            pool.setStatus("RUNNING");
+            pool.setStatusMessage(null);
+            pool.setPendingOperation(null);
+            nodePoolStore.put(nodePoolKey(cluster.getProject(), cluster.getLocation(), cluster.getName(), pool.getName()),
+                    pool);
+            operationService.completeOperation(pending, null);
+            LOG.infov("Node pool {0} of GKE cluster {1} is RUNNING with {2} node(s)", pool.getName(), cluster.getName(),
+                    String.valueOf(nodes.size()));
+        }
+    }
+
+    /** Whether every node of the pool is registered and Ready, putting back the labels the k3s cloud
+     * controller overwrites when a node registers. */
+    private boolean nodesReady(StoredCluster cluster, StoredNodePool pool, List<StoredNode> nodes,
+                               Map<String, GkeClusterManager.NodeState> states) {
+        boolean ready = true;
+        for (StoredNode node : nodes) {
+            GkeClusterManager.NodeState state = states.get(node.getName());
+            if (state == null || !state.ready()) {
+                ready = false;
+                continue;
+            }
+            GkeNodes.NodeSpec spec = GkeNodes.spec(cluster.getProject(), pool.getName(), node.getZone(),
+                    node.getName(), pool.getConfig(), maxPods(cluster, pool), pool.isGpuTaint(), 0, 0);
+            Map<String, String> drifted = new HashMap<>();
+            spec.labels().forEach((k, v) -> {
+                if (!v.equals(state.labels().get(k))) {
+                    drifted.put(k, v);
+                }
+            });
+            if (!drifted.isEmpty()) {
+                clusterManager.labelNode(cluster, node.getName(), drifted);
+            }
+            if (spec.acceleratorCount() != state.gpuCapacity()) {
+                clusterManager.setGpuCapacity(cluster, node.getName(), spec.acceleratorCount());
+                ready = false;
+            }
+        }
+        return ready;
     }
 
     /**
@@ -1071,29 +1723,35 @@ public class GkeService {
         }
     }
 
-    /** Moves a still-provisioning cluster to {@code RUNNING} (with its CA) or, given a failure, to
-     * {@code ERROR}, and finishes the create operation recorded on it. A pass whose cluster was
-     * deleted, recreated or settled meanwhile writes nothing. */
+    /** Moves a still-provisioning or reconciling cluster to {@code RUNNING} (with its CA) or, given a
+     * failure, to {@code ERROR}, and finishes the create operation recorded on it. A pass whose cluster
+     * was deleted, recreated or settled meanwhile writes nothing. */
     private void settle(StoredCluster seen, String caCertificate, String failure) {
         String key = clusterKey(seen.getProject(), seen.getLocation(), seen.getName());
         synchronized (lifecycleLock) {
             Optional<StoredCluster> current = clusterStore.get(key);
             if (current.isEmpty()
                     || !Objects.equals(current.get().getCreateOperation(), seen.getCreateOperation())
-                    || !"PROVISIONING".equals(current.get().getStatus())) {
+                    || !Objects.equals(current.get().getStatus(), seen.getStatus())
+                    || !Objects.equals(current.get().getReconcileSince(), seen.getReconcileSince())) {
                 return;
             }
             StoredCluster cluster = current.get();
             if (failure == null) {
                 cluster.setCaCertificate(caCertificate);
                 cluster.setStatus("RUNNING");
+                cluster.setStatusMessage(null);
             } else {
                 cluster.setStatus("ERROR");
                 cluster.setStatusMessage(failure);
             }
+            cluster.setReconcileSince(null);
+            String pending = cluster.getPendingOperation();
+            cluster.setPendingOperation(null);
             clusterStore.put(key, cluster);
-            operationService.completeOperation(cluster.getCreateOperation(),
-                    failure == null ? null : operationError(Status.Code.INTERNAL, failure));
+            Map<String, Object> error = failure == null ? null : operationError(Status.Code.INTERNAL, failure);
+            operationService.completeOperation(cluster.getCreateOperation(), error);
+            operationService.completeOperation(pending, error);
         }
         if (failure == null) {
             LOG.infov("GKE cluster {0} is now RUNNING", seen.getName());
@@ -1107,9 +1765,10 @@ public class GkeService {
      * may still be starting is worse than waiting. The stopped-container check still applies. */
     boolean startupExpired(StoredCluster cluster) {
         Instant created = null;
-        if (cluster.getCreateTime() != null) {
+        String since = cluster.getReconcileSince() != null ? cluster.getReconcileSince() : cluster.getCreateTime();
+        if (since != null) {
             try {
-                created = Instant.parse(cluster.getCreateTime());
+                created = Instant.parse(since);
             } catch (DateTimeParseException e) {
                 // Logged below, once per cluster.
             }
@@ -1122,6 +1781,10 @@ public class GkeService {
             return false;
         }
         return created.plus(STARTUP_TIMEOUT).isBefore(Instant.now());
+    }
+
+    private static String defaultVersion() {
+        return GkeReleases.defaultRelease(Optional.empty()).gkeVersion();
     }
 
     private boolean mock() {

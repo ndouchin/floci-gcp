@@ -98,6 +98,18 @@ public class GkeOperationService {
                 clusterTargetLink(project, location, clusterId) + "/nodePools/" + nodePoolId, "DONE");
     }
 
+    /** A node-pool-scoped operation that stays {@code RUNNING} until {@link #completeOperation} finishes it. */
+    public StoredOperation createRunningNodePoolOperation(
+            String project,
+            String location,
+            String clusterId,
+            String nodePoolId,
+            OperationType type) {
+
+        return createOperation(project, location, type,
+                clusterTargetLink(project, location, clusterId) + "/nodePools/" + nodePoolId, "RUNNING");
+    }
+
     private static String clusterTargetLink(String project, String location, String clusterId) {
         return "projects/" + project + "/locations/" + location + "/clusters/" + clusterId;
     }

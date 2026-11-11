@@ -16,6 +16,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doThrow;
@@ -41,7 +42,7 @@ class GkeClusterManagerPortTest {
         }
         lifecycleManager = mock(ContainerLifecycleManager.class);
         config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().gke().defaultImage()).thenReturn("rancher/k3s:test");
+        when(config.services().gke().defaultImage()).thenReturn(Optional.of("rancher/k3s:test"));
         when(config.services().gke().apiServerBasePort()).thenReturn(port);
         when(config.services().gke().apiServerMaxPort()).thenReturn(port);
         when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
@@ -50,7 +51,7 @@ class GkeClusterManagerPortTest {
 
     @Test
     void failedStartReleasesTheHostPort() {
-        doThrow(new RuntimeException("docker unavailable")).when(lifecycleManager).removeIfExists(anyString());
+        doThrow(new RuntimeException("docker unavailable")).when(lifecycleManager).removeIfExists(anyString(), anyBoolean());
         StoredCluster cluster = cluster();
 
         assertThrows(RuntimeException.class, () -> manager().startCluster(cluster));
@@ -69,7 +70,7 @@ class GkeClusterManagerPortTest {
         assertThrows(RuntimeException.class,
                 () -> manager(mock(ContainerBuilder.class, RETURNS_DEEP_STUBS)).startCluster(cluster));
 
-        verify(lifecycleManager).stopAndRemove("container-1", null);
+        verify(lifecycleManager).stopAndRemove("container-1", null, true);
         verify(lifecycleManager).removeVolume(cluster.getVolumeName());
         assertEquals(null, cluster.getContainerId());
         assertEquals(0, cluster.getHostPort());
@@ -83,7 +84,7 @@ class GkeClusterManagerPortTest {
 
         manager().stopCluster(cluster);
 
-        verify(lifecycleManager).stopAndRemove("container-1", null);
+        verify(lifecycleManager).stopAndRemove("container-1", null, true);
         assertEquals(port, allocate());
     }
 
@@ -95,6 +96,18 @@ class GkeClusterManagerPortTest {
         manager().stopCluster(cluster);
 
         assertThrows(RuntimeException.class, this::allocate);
+    }
+
+    @Test
+    void deleteClusterRemovesTheContainerEvenWhenClustersAreKeptRunningOnShutdown() {
+        StoredCluster cluster = runningCluster();
+        when(config.services().gke().keepRunningOnShutdown()).thenReturn(true);
+
+        manager().deleteCluster(cluster);
+
+        verify(lifecycleManager).stopAndRemove("container-1", null, true);
+        verify(lifecycleManager).removeVolume("floci-gcp-gke-p1-c1");
+        assertEquals(port, allocate());
     }
 
     private StoredCluster runningCluster() {

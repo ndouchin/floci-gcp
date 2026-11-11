@@ -41,7 +41,7 @@ class GkeUpdateMasterRestIntegrationTest {
         String operationName = given()
                 .urlEncodingEnabled(false)
                 .contentType("application/json")
-                .body("{\"masterVersion\":\"1.31.5-gke.1\"}")
+                .body("{\"masterVersion\":\"1.36.5-gke.1\"}")
                 .when().post(clusterPath + ":updateMaster")
                 .then()
                 .statusCode(200)
@@ -64,7 +64,7 @@ class GkeUpdateMasterRestIntegrationTest {
                 .when().get(clusterPath)
                 .then()
                 .statusCode(200)
-                .body("currentMasterVersion", equalTo("1.31.5-gke.1"))
+                .body("currentMasterVersion", equalTo("1.36.5-gke.1"))
                 .body("currentNodeVersion", equalTo(nodeVersionBefore))
                 .body("nodePools[0].version", equalTo(nodeVersionBefore));
     }
@@ -132,7 +132,7 @@ class GkeUpdateMasterRestIntegrationTest {
         given()
                 .urlEncodingEnabled(false)
                 .contentType("application/json")
-                .body("{\"masterVersion\":\"1.31.5-gke.1\"}")
+                .body("{\"masterVersion\":\"1.36.5-gke.1\"}")
                 .when().post(BASE + "/clusters/does-not-exist:updateMaster")
                 .then()
                 .statusCode(404)
