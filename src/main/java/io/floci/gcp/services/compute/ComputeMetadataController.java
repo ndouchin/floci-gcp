@@ -6,8 +6,6 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.ProjectNumbers;
 import io.floci.gcp.services.compute.ComputeMetadataTree.Dir;
-import io.floci.gcp.services.compute.ComputeMetadataTree.Leaf;
-import io.floci.gcp.services.compute.ComputeMetadataTree.Node;
 import io.smallrye.common.annotation.Blocking;
 import io.smallrye.mutiny.Uni;
 import io.vertx.core.MultiMap;
@@ -24,14 +22,12 @@ import jakarta.ws.rs.core.Response;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
-import java.util.HexFormat;
+import java.util.List;
 import java.util.Optional;
-import java.util.TreeMap;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -52,8 +48,8 @@ import java.util.concurrent.atomic.AtomicReference;
 @Path("/computeMetadata/v1")
 public class ComputeMetadataController {
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final String TEXT = "application/text";
-    private static final String JSON_TYPE = "application/json";
+    private static final String TEXT = MetadataTreeRenderer.TEXT;
+    private static final String JSON_TYPE = MetadataTreeRenderer.JSON_TYPE;
     private static final long POLL_MILLIS = 250;
 
     private final ComputeService compute;
@@ -194,62 +190,30 @@ public class ComputeMetadataController {
         Optional<ComputeService.MetadataView> view = compute.metadataView(instance.project(), instance.zone(), instance.name());
         if (view.isEmpty()) { return Optional.empty(); }
         Dir tree = ComputeMetadataTree.build(instance.project(), instance.zone(), view.get());
-        String trimmed = path.endsWith("/") ? path.substring(0, path.length() - 1) : path;
-        Node node = tree;
-        if (!trimmed.isEmpty()) {
-            for (String part : trimmed.split("/")) {
-                if (!(node instanceof Dir dir) || !dir.children().containsKey(part)) { return Optional.empty(); }
-                node = dir.children().get(part);
+        return switch (MetadataTreeRenderer.render(tree, path, slash, recursive, alt, rawQuery, Set.of("instance/tags"))) {
+            case MetadataTreeRenderer.NotFound ignored -> Optional.empty();
+            case MetadataTreeRenderer.Redirect redirect -> Optional.of(new Rendered(null, null, null, true, false,
+                    Response.status(301).location(URI.create(redirect.location()))
+                            .header("Metadata-Flavor", "Google").build()));
+            case MetadataTreeRenderer.Rendered rendered -> Optional.of(new Rendered(rendered.body(),
+                    rendered.contentType(), rendered.etag(), rendered.directory(), false, null));
+            case MetadataTreeRenderer.Generated generated -> {
+                List<String> parts = generated.path();
+                String email = MetadataTreeRenderer.accountEmail(tree, parts.get(parts.size() - 2));
+                if ("token".equals(parts.get(parts.size() - 1))) {
+                    yield Optional.of(generated(token(), JSON_TYPE));
+                }
+                if (audience == null || audience.isBlank()) {
+                    yield Optional.of(new Rendered(null, null, null, false, true,
+                            plain(400, "non-empty audience parameter required")));
+                }
+                yield Optional.of(generated(identity(instance, view.get(), email, audience, format, licenses), TEXT));
             }
-        }
-        if (node instanceof Leaf leaf && leaf.generated()) {
-            String[] parts = trimmed.split("/");
-            String email = accountEmail(tree, parts[parts.length - 2]);
-            if (trimmed.endsWith("/token")) {
-                return Optional.of(generated(token(), JSON_TYPE));
-            }
-            if (audience == null || audience.isBlank()) {
-                return Optional.of(new Rendered(null, null, null, false, true,
-                        plain(400, "non-empty audience parameter required")));
-            }
-            return Optional.of(generated(identity(instance, view.get(), email, audience, format, licenses), TEXT));
-        }
-        if (node instanceof Dir dir) {
-            if (!slash) {
-                return Optional.of(new Rendered(null, null, null, true, false,
-                        Response.status(301).location(URI.create("/computeMetadata/v1/" + path + "/"
-                                + (rawQuery == null || rawQuery.isEmpty() ? "" : "?" + rawQuery)))
-                                .header("Metadata-Flavor", "Google").build()));
-            }
-            if (recursive) {
-                String body = "text".equals(alt) ? ComputeMetadataTree.text(dir, "") : write(ComputeMetadataTree.json(dir));
-                return Optional.of(rendered(body, "text".equals(alt) ? TEXT : JSON_TYPE, true));
-            }
-            StringBuilder listing = new StringBuilder();
-            new TreeMap<>(dir.children()).forEach((key, child) ->
-                    listing.append(key).append(child instanceof Dir ? "/" : "").append('\n'));
-            return Optional.of(rendered(listing.toString(), TEXT, true));
-        }
-        Leaf leaf = (Leaf) node;
-        boolean json = "json".equals(alt) || (alt == null && trimmed.equals("instance/tags"));
-        return Optional.of(rendered(json ? write(leaf.json()) : leaf.text(), json ? JSON_TYPE : TEXT, false));
-    }
-
-    /** The email of a service account directory, which is listed both as {@code default} and by its email. */
-    private static String accountEmail(Dir tree, String account) {
-        Node node = tree;
-        for (String part : new String[] {"instance", "service-accounts", account, "email"}) {
-            node = ((Dir) node).children().get(part);
-        }
-        return ((Leaf) node).text();
-    }
-
-    private static Rendered rendered(String body, String type, boolean directory) {
-        return new Rendered(body, type, etag(body), directory, false, null);
+        };
     }
 
     private static Rendered generated(String body, String type) {
-        return new Rendered(body, type, etag(body), false, true, null);
+        return new Rendered(body, type, MetadataTreeRenderer.etag(body), false, true, null);
     }
 
     private Duration waitTimeout(String value) {
@@ -302,21 +266,8 @@ public class ComputeMetadataController {
                 + base64.encodeToString("floci-gcp-unsigned".getBytes(StandardCharsets.UTF_8));
     }
 
-    private static String etag(String body) {
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(body.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(digest, 0, 8);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
     private static String write(JsonNode node) {
-        try {
-            return JSON.writeValueAsString(node);
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
-        }
+        return MetadataTreeRenderer.write(node);
     }
 
     private static Response plain(int status, String body) {
