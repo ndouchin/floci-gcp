@@ -87,6 +87,18 @@ class IamServiceTest {
     }
 
     @Test
+    void aWorkloadPoolIsNotAnAccountId() {
+        // What GKE's metadata server returns as the email of an unannotated Kubernetes ServiceAccount, fed back to
+        // IAM (for example to sign a URL), fails like this on GCP ("Troubleshoot GKE authentication").
+        for (String project : List.of("-", "p1")) {
+            GcpException e = assertThrows(GcpException.class, () -> service.sign(project, "p1.svc.id.goog", new byte[] {1}));
+            assertEquals(400, e.getHttpStatus());
+            assertTrue(e.getMessage().contains("Invalid form of account ID p1.svc.id.goog. Should be "
+                    + "[Gaia ID |Email |Unique ID |] of the account"), e.getMessage());
+        }
+    }
+
+    @Test
     void theSigningKeyIsNotListedAmongUserManagedKeys() {
         service.createServiceAccount("p1", "signer", "", "");
         service.signingKeyId("p1", "signer@p1.iam.gserviceaccount.com");
